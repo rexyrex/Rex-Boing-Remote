@@ -153,6 +153,11 @@ func TestLinuxCapabilities(t *testing.T) {
 		if name == "linux-intel-hybrid" && runtime.GOOS == "windows" {
 			continue // its RAPL zones need ':' in their names
 		}
+		if runtime.GOOS == "windows" {
+			// RAPL zones are named intel-rapl:N, which a Windows checkout
+			// cannot create, so no fixture there reports power.
+			w = strings.Replace(w, " power", "", 1)
+		}
 		c, _ := linuxTFixture(t, name)
 		if got := strings.Join(c.Capabilities(), " "); got != w {
 			t.Errorf("%s: capabilities %q, want %q", name, got, w)
