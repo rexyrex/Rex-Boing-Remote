@@ -1,0 +1,10 @@
+29 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
+30 29 259:1 / /boot/efi rw,relatime shared:2 - vfat /dev/nvme0n1p1 rw
+31 29 0:45 / /tank rw,xattr shared:3 - zfs tank rw
+32 29 0:46 / /tank/media rw,xattr shared:4 - zfs tank/media rw
+33 29 259:2 /srv/data /data rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
+34 29 8:1 / /mnt/backup rw,relatime shared:5 - xfs /dev/sda1 rw
+35 29 0:60 / /var/lib/docker/overlay2/abc/merged rw shared:6 - overlay overlay rw,lowerdir=/x
+36 29 0:61 / /mnt/nas rw shared:7 - cifs //nas/share rw,vers=3.1.1
+37 29 259:6 / /var/lib/kubelet/pods/x/volumes rw shared:8 - ext4 /dev/nvme1n1p1 rw
+38 29 259:6 / /games rw shared:9 - ext4 /dev/nvme1n1p1 rw

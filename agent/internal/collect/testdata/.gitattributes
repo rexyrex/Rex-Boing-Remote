@@ -1,0 +1,3 @@
+# Fixture trees mirror Linux /proc and /sys byte for byte: never convert
+# line endings (Windows CI checks them out too).
+* -text

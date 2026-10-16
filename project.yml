@@ -1,0 +1,96 @@
+name: RexBoingRemote
+options:
+  bundleIdPrefix: com.rexyrex
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: false
+
+packages:
+  # The cards, characters, samplers and wire format shared with Rex Boing.
+  # Scripts/build.sh swaps this for a local checkout when REX_BOING_PATH is set.
+  RexBoingKit:
+    url: https://github.com/rexyrex/Rex-Boing
+    from: 1.2.0
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: NO
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEAD_CODE_STRIPPING: YES
+    CLANG_WARN_DOCUMENTATION_COMMENTS: NO
+
+targets:
+  RexBoingRemote:
+    type: application
+    platform: macOS
+    sources:
+      - path: RexBoingRemote
+        excludes:
+          - "Info.plist"
+          - "RexBoingRemote.entitlements"
+    settings:
+      base:
+        PRODUCT_NAME: "Rex Boing Remote"
+        PRODUCT_BUNDLE_IDENTIFIER: com.rexyrex.RexBoingRemote
+        INFOPLIST_FILE: RexBoingRemote/Info.plist
+        CODE_SIGN_ENTITLEMENTS: RexBoingRemote/RexBoingRemote.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+    dependencies:
+      - package: RexBoingKit
+        product: RexBoingKit
+      - target: rex-boing-agent
+        link: false
+      - sdk: ServiceManagement.framework
+      - sdk: Network.framework
+    postBuildScripts:
+      - name: Embed agents
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Agents"
+          rm -rf "$DEST"
+          mkdir -p "$DEST/darwin-universal"
+          cp "${BUILT_PRODUCTS_DIR}/rex-boing-agent" "$DEST/darwin-universal/rex-boing-agent"
+          if [ -d "${SRCROOT}/build/agents" ]; then
+            cp -R "${SRCROOT}/build/agents/." "$DEST/"
+          else
+            echo "warning: build/agents is missing; run Scripts/build-agents.sh for Linux and Windows agents"
+          fi
+
+  rex-boing-agent:
+    type: tool
+    platform: macOS
+    sources:
+      - path: MacAgent
+    settings:
+      base:
+        PRODUCT_NAME: rex-boing-agent
+        PRODUCT_BUNDLE_IDENTIFIER: com.rexyrex.RexBoingRemote.agent
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: RexBoingKit
+        product: RexBoingKit
+      - sdk: IOKit.framework
+
+schemes:
+  RexBoingRemote:
+    build:
+      targets:
+        RexBoingRemote: all
+        rex-boing-agent: all
+    run:
+      config: Debug
+    archive:
+      config: Release

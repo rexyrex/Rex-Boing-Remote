@@ -1,0 +1,8 @@
+22 1 253:0 / / rw,relatime shared:1 - btrfs /dev/mapper/luks-1234 rw,seclabel,compress=zstd:1,ssd,subvol=/root
+60 22 253:0 /home /home rw,relatime shared:31 - btrfs /dev/mapper/luks-1234 rw,seclabel,subvol=/home
+63 22 259:1 / /boot/efi rw,relatime shared:33 - vfat /dev/nvme0n1p1 rw,fmask=0077
+25 22 0:23 / /sys rw,nosuid shared:2 - sysfs sysfs rw
+26 22 0:5 / /proc rw,nosuid shared:13 - proc proc rw
+70 22 0:40 / /tmp rw shared:40 - tmpfs tmpfs rw
+90 22 7:0 / /var/lib/snapd/snap/core22/1380 ro,nodev shared:50 - squashfs /dev/loop0 ro
+91 22 0:50 / /run/media/alex/My\040Stick rw,nosuid shared:60 - exfat /dev/sda1 rw

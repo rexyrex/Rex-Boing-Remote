@@ -1,0 +1,8 @@
+Name:	ollama
+State:	S (sleeping)
+Tgid:	4321
+Pid:	4321
+PPid:	1
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+Threads:	30

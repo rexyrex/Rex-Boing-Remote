@@ -1,0 +1,308 @@
+// Command rex-boing-agent reports a machine to Rex Boing Remote over SSH.
+// PROTOCOL.md at the repository root describes every command and message.
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"runtime"
+	"strings"
+
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/collect"
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/manage"
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/stream"
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
+)
+
+// version is set at build time: -ldflags "-X main.version=0.1.0".
+var version = "dev"
+
+const agentName = "rex-boing-agent"
+
+const usageText = `rex-boing-agent reports this machine to Rex Boing Remote over SSH.
+
+Usage:
+  rex-boing-agent stream [--interval S] [--detail vitals|full] [--count N]
+  rex-boing-agent version
+  rex-boing-agent doctor [--json]
+  rex-boing-agent install [--key "ssh-ed25519 AAAA…"] [--label NAME]   (key on stdin without --key)
+  rex-boing-agent pair-code
+  rex-boing-agent upgrade --sha256 HEX --size N                       (new binary on stdin)
+  rex-boing-agent uninstall
+  rex-boing-agent ssh                                                 (used by the installed key)
+`
+
+func main() {
+	// Windows leaves the previous executable behind after an upgrade (a
+	// running .exe can be renamed but not deleted); clear it on every run.
+	// A no-op on other systems.
+	manage.CleanupOld()
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+func agentInfo() wire.AgentInfo {
+	return wire.AgentInfo{Name: agentName, Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH}
+}
+
+// run dispatches a command line and returns the exit status.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+	cmd, rest := args[0], args[1:]
+	switch cmd {
+	case "stream":
+		return cmdStream(rest, stdin, stdout, stderr)
+	case "version":
+		return cmdVersion(stdout)
+	case "doctor":
+		return cmdDoctor(rest, stdout, stderr)
+	case "install":
+		return cmdInstall(rest, stdin, stdout, stderr)
+	case "pair-code":
+		return cmdPairCode(stdout, stderr)
+	case "upgrade":
+		return cmdUpgrade(rest, stdin, stdout, stderr)
+	case "uninstall":
+		return printResult(stdout, manage.Uninstall())
+	case "ssh":
+		return cmdSSH(os.Getenv("SSH_ORIGINAL_COMMAND"), stdin, stdout, stderr)
+	case "help", "-h", "--help":
+		fmt.Fprint(stdout, usageText)
+		return 0
+	}
+	fmt.Fprintf(stderr, "rex-boing-agent: unknown command %q\n\n%s", cmd, usageText)
+	return 2
+}
+
+func newFlags(name string, stderr io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet(agentName+" "+name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	return fs
+}
+
+func cmdStream(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := newFlags("stream", stderr)
+	count := fs.Int("count", 0, "exit after `N` samples (0: until stdin closes)")
+	interval := fs.Float64("interval", stream.DefaultInterval, "seconds between samples, 0.5–10")
+	detail := fs.String("detail", "vitals", "starting detail: vitals or full")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	if *detail != string(wire.DetailVitals) && *detail != string(wire.DetailFull) {
+		fmt.Fprintf(stderr, "rex-boing-agent: --detail must be vitals or full\n")
+		return 2
+	}
+	c := collect.New()
+	defer c.Close()
+	err := stream.Run(c, stdin, stdout, stream.Options{
+		Agent:    agentInfo(),
+		Interval: *interval,
+		Detail:   wire.Detail(*detail),
+		Count:    *count,
+		Log:      stderr,
+	})
+	if err != nil {
+		// stdout is gone (the session dropped): nothing left to tell anyone.
+		return 1
+	}
+	return 0
+}
+
+func cmdVersion(stdout io.Writer) int {
+	v := struct {
+		Name     string `json:"name"`
+		Version  string `json:"version"`
+		Protocol int    `json:"protocol"`
+		OS       string `json:"os"`
+		Arch     string `json:"arch"`
+	}{agentName, version, wire.ProtocolVersion, runtime.GOOS, runtime.GOARCH}
+	return printJSON(stdout, v)
+}
+
+func cmdDoctor(args []string, stdout, stderr io.Writer) int {
+	fs := newFlags("doctor", stderr)
+	asJSON := fs.Bool("json", false, "print the report as JSON")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	c := collect.New()
+	defer c.Close()
+	host := c.Host()
+	caps := c.Capabilities()
+	checks := c.Doctor()
+	if *asJSON {
+		return printJSON(stdout, struct {
+			Agent        wire.AgentInfo  `json:"agent"`
+			Host         wire.Host       `json:"host"`
+			Capabilities []string        `json:"capabilities"`
+			Checks       []collect.Check `json:"checks"`
+		}{agentInfo(), host, caps, checks})
+	}
+	fmt.Fprint(stdout, formatDoctor(agentInfo(), host, checks))
+	return 0
+}
+
+// formatDoctor renders the human-readable doctor report.
+func formatDoctor(a wire.AgentInfo, h wire.Host, checks []collect.Check) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s (protocol %d, %s/%s)\n", a.Name, a.Version, wire.ProtocolVersion, a.OS, a.Arch)
+	var about []string
+	for _, s := range []string{strings.TrimSpace(h.Vendor + " " + h.ModelName), h.ChipName,
+		strings.TrimSpace(h.OSName + " " + h.OSVersion), kernelText(h.Kernel)} {
+		if s != "" {
+			about = append(about, s)
+		}
+	}
+	fmt.Fprintf(&b, "%s: %s\n\n", h.Hostname, strings.Join(about, ", "))
+	width := 0
+	for _, c := range checks {
+		if len(c.Name) > width {
+			width = len(c.Name)
+		}
+	}
+	for _, c := range checks {
+		mark := "ok"
+		if !c.OK {
+			mark = "!!"
+		}
+		fmt.Fprintf(&b, "[%s] %-*s  %s\n", mark, width, c.Name, c.Detail)
+		if c.Fix != "" {
+			indent := strings.Repeat(" ", width+7)
+			lines := strings.Split(c.Fix, "\n")
+			fmt.Fprintf(&b, "%sFix: %s\n", indent, lines[0])
+			for _, l := range lines[1:] {
+				fmt.Fprintf(&b, "%s     %s\n", indent, l)
+			}
+		}
+	}
+	return b.String()
+}
+
+func kernelText(k string) string {
+	if k == "" {
+		return ""
+	}
+	return "kernel " + k
+}
+
+func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := newFlags("install", stderr)
+	key := fs.String("key", "", "the OpenSSH public key line (default: read from stdin)")
+	label := fs.String("label", "", "a name for the Mac the key belongs to")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	k := *key
+	if k == "" {
+		k = firstLine(stdin)
+	}
+	return printResult(stdout, manage.Install(manage.InstallOptions{Key: k, Label: *label}))
+}
+
+// firstLine returns the first non-empty line of r, reading at most 16 KiB.
+func firstLine(r io.Reader) string {
+	sc := bufio.NewScanner(io.LimitReader(r, 16<<10))
+	sc.Buffer(make([]byte, 0, 4096), 16<<10)
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+func cmdPairCode(stdout, stderr io.Writer) int {
+	code, err := manage.PairCode()
+	if err != nil {
+		fmt.Fprintf(stderr, "rex-boing-agent: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, code)
+	return 0
+}
+
+// upgradeFlags parses the upgrade arguments.
+func upgradeFlags(args []string, stderr io.Writer) (sha string, size int64, err error) {
+	fs := newFlags("upgrade", stderr)
+	shaFlag := fs.String("sha256", "", "SHA-256 of the new binary, hex")
+	sizeFlag := fs.Int64("size", 0, "size of the new binary in bytes")
+	if err := fs.Parse(args); err != nil {
+		return "", 0, err
+	}
+	if fs.NArg() > 0 || *shaFlag == "" || *sizeFlag <= 0 {
+		return "", 0, errors.New("upgrade needs --sha256 HEX --size N")
+	}
+	return *shaFlag, *sizeFlag, nil
+}
+
+func cmdUpgrade(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	sha, size, err := upgradeFlags(args, stderr)
+	if err != nil {
+		return printResult(stdout, wire.Result{OK: false, Error: "usage", Message: err.Error()})
+	}
+	return printResult(stdout, manage.Upgrade(stdin, sha, size))
+}
+
+// sshCommand checks the command a restricted key's client asked for
+// (SSH_ORIGINAL_COMMAND) against the commands that key may run.
+func sshCommand(original string) ([]string, error) {
+	const allowed = "stream, version, doctor, doctor --json, upgrade, uninstall, pair-code"
+	f := strings.Fields(original)
+	if len(f) == 0 {
+		return nil, fmt.Errorf("this key only runs the Rex Boing Remote agent and no command was given (allowed: %s)", allowed)
+	}
+	ok := false
+	switch f[0] {
+	case "stream", "version", "uninstall", "pair-code":
+		ok = len(f) == 1
+	case "doctor":
+		ok = len(f) == 1 || (len(f) == 2 && f[1] == "--json")
+	case "upgrade":
+		_, _, err := upgradeFlags(f[1:], io.Discard)
+		ok = err == nil
+	}
+	if !ok {
+		shown := original
+		if len(shown) > 80 {
+			shown = shown[:80] + "…"
+		}
+		return nil, fmt.Errorf("refused %q: this key only runs the Rex Boing Remote agent (allowed: %s)", shown, allowed)
+	}
+	return f, nil
+}
+
+func cmdSSH(original string, stdin io.Reader, stdout, stderr io.Writer) int {
+	args, err := sshCommand(original)
+	if err != nil {
+		fmt.Fprintf(stderr, "rex-boing-agent: %v\n", err)
+		return 1
+	}
+	return run(args, stdin, stdout, stderr)
+}
+
+func printResult(stdout io.Writer, r wire.Result) int {
+	printJSON(stdout, r)
+	if !r.OK {
+		return 1
+	}
+	return 0
+}
+
+func printJSON(stdout io.Writer, v any) int {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 1
+	}
+	b = append(b, '\n')
+	if _, err := stdout.Write(b); err != nil {
+		return 1
+	}
+	return 0
+}

@@ -1,0 +1,2 @@
+22 1 254:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw,discard,errors=remount-ro
+24 22 0:22 / /run rw,nosuid shared:5 - tmpfs tmpfs rw

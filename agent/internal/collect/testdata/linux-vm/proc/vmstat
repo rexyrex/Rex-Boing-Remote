@@ -1,0 +1,7 @@
+nr_free_pages 641589
+nr_zone_inactive_anon 198337
+pgpgin 2809910198
+pgpgout 1234
+pswpin 0
+pswpout 0
+pgalloc_dma 0

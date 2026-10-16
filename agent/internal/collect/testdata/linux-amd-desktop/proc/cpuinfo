@@ -1,0 +1,7 @@
+processor	: 0
+vendor_id	: AuthenticAMD
+model name	: AMD Ryzen 7 7700X 8-Core Processor
+physical id	: 0
+core id		: 0
+flags		: fpu vme de pse tsc msr pae mce
+

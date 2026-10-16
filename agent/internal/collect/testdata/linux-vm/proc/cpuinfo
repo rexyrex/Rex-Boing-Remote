@@ -1,0 +1,14 @@
+processor	: 0
+vendor_id	: AuthenticAMD
+model name	: AMD EPYC 7763 64-Core Processor
+physical id	: 0
+core id		: 0
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep hypervisor lahf_lm
+
+processor	: 1
+vendor_id	: AuthenticAMD
+model name	: AMD EPYC 7763 64-Core Processor
+physical id	: 0
+core id		: 1
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep hypervisor lahf_lm
+

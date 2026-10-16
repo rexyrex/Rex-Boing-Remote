@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  agent:
+    name: Agent on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: agent
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Build every target
+        run: |
+          for target in linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64 darwin/arm64; do
+            CGO_ENABLED=0 GOOS=${target%/*} GOARCH=${target#*/} GOARM=6 go build -o /dev/null ./cmd/rex-boing-agent
+          done
+      - name: Run on this machine
+        run: |
+          go build -o rex-boing-agent$([ "$RUNNER_OS" = Windows ] && echo .exe) ./cmd/rex-boing-agent
+          ./rex-boing-agent* version
+          ./rex-boing-agent* doctor
+          # Stdin stays open while samples are taken; EOF ends the stream.
+          { echo '{"want":"full"}'; sleep 8; } | ./rex-boing-agent* stream --count 4 --interval 1 > stream.jsonl
+          $([ "$RUNNER_OS" = Windows ] && echo python || echo python3) ../.github/scripts/check-stream.py stream.jsonl
+
+  app:
+    name: App and macOS agent
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+      - name: Tools
+        run: brew install xcodegen
+      - name: Build
+        run: Scripts/build.sh
+      - name: Run the macOS agent
+        run: |
+          AGENT="dist/Rex Boing Remote.app/Contents/Resources/Agents/darwin-universal/rex-boing-agent"
+          "$AGENT" version
+          "$AGENT" doctor
+          { echo '{"want":"full"}'; sleep 8; } | "$AGENT" stream --count 4 --interval 1 > stream.jsonl
+          python3 .github/scripts/check-stream.py stream.jsonl
+      - name: Installer syntax
+        run: sh -n install.sh

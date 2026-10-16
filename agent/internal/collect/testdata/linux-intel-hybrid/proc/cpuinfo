@@ -1,0 +1,15 @@
+processor	: 0
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 154
+model name	: 12th Gen Intel(R) Core(TM) i7-1260P
+physical id	: 0
+core id		: 0
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm
+
+processor	: 1
+vendor_id	: GenuineIntel
+model name	: 12th Gen Intel(R) Core(TM) i7-1260P
+physical id	: 0
+core id		: 0
+
