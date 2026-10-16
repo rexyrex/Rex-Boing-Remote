@@ -636,6 +636,9 @@ func (v *winVolumeCache) get() []wire.Volume {
 func (c *winCollector) Doctor() []Check {
 	var checks []Check
 	add := func(name string, ok bool, detail, fix string) {
+		if ok {
+			fix = "" // advice is only for what does not work
+		}
 		checks = append(checks, Check{Name: name, OK: ok, Detail: detail, Fix: fix})
 	}
 	c.safe("pdh", c.collectPDH)
