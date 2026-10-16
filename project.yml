@@ -50,8 +50,10 @@ targets:
     dependencies:
       - package: RexBoingKit
         product: RexBoingKit
+      # Built first; the Embed agents phase below copies it to Agents/.
       - target: rex-boing-agent
         link: false
+        embed: false
       - sdk: ServiceManagement.framework
       - sdk: Network.framework
     postBuildScripts:

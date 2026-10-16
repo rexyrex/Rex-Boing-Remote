@@ -37,6 +37,11 @@ Scripts/build.sh
 APP="dist/Rex Boing Remote.app"
 AGENT="$APP/Contents/Resources/Agents/darwin-universal/rex-boing-agent"
 
+# The only Mach-O executables in the bundle must be the app and the agent
+# under Agents/; anything else would be unsigned and fail notarization.
+STRAY=$(find "$APP/Contents" -type f -perm -u+x ! -path "*/MacOS/*" ! -path "*/Agents/*" -exec file {} \; | grep -c "Mach-O" || true)
+[ "$STRAY" -eq 0 ] || { echo "Unexpected executables in the bundle:" >&2; find "$APP/Contents" -type f -perm -u+x ! -path "*/MacOS/*" ! -path "*/Agents/*" >&2; exit 1; }
+
 echo "==> Signing the macOS agent"
 codesign --force --options runtime --timestamp \
     --identifier com.rexyrex.RexBoingRemote.agent --sign "$IDENTITY" "$AGENT"
