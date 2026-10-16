@@ -852,13 +852,18 @@ func TestLinuxProcesses(t *testing.T) {
 	linuxTPut(t, root, "proc/1234/io", "read_bytes: 2000000\nwrite_bytes: 2000000\n")
 	linuxTPause(c, 2*time.Second)
 	p = c.Sample(wire.DetailFull).Processes
-	linuxTNear(t, "interval", p.Interval, 2, 0.01)
+	// The window is the two seconds wound back plus however long this test
+	// took to get here, which on a busy CI runner is a noticeable fraction
+	// of a second; the rates are judged against the window actually used.
+	if p.Interval < 2 || p.Interval > 2.6 {
+		t.Errorf("interval = %v, want 2 s plus the test's own run time", p.Interval)
+	}
 	rows = map[int32]wire.ProcessRow{}
 	for _, r := range p.Rows {
 		rows[r.PID] = r
 	}
-	linuxTNear(t, "firefox cpu", rows[1234].CPU, 50, 0.3)
-	linuxTNear(t, "firefox disk read", rows[1234].DiskRead, 500000, 3000)
+	linuxTNear(t, "firefox cpu", rows[1234].CPU, 100/p.Interval, 0.3)
+	linuxTNear(t, "firefox disk read", rows[1234].DiskRead, 1e6/p.Interval, 3000)
 	if p.Rank["cpu"][0] != 1234 || p.Rank["disk"][0] != 1234 {
 		t.Errorf("rank %v", p.Rank)
 	}
