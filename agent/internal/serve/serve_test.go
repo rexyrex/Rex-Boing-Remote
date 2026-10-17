@@ -172,13 +172,21 @@ func TestUnknownAndSilentClients(t *testing.T) {
 	if err != nil || !strings.Contains(string(b), `"error"`) {
 		t.Errorf("unknown request: %s %v", b, err)
 	}
-	// A client that connects and says nothing does not block the others.
+	// Clients that connect and say nothing do not block the endpoint for
+	// long. Past maxClients the server hangs up at once, which on Windows
+	// can already fail the client's dial (its owner check finds the pipe
+	// disconnected): that is the busy answer, not a failure.
+	connected := 0
 	for i := 0; i < maxClients+2; i++ {
 		c, err := dial(dir, time.Second)
 		if err != nil {
-			t.Fatal(err)
+			continue
 		}
+		connected++
 		defer c.Close()
+	}
+	if connected < maxClients-1 {
+		t.Fatalf("only %d of %d silent clients connected", connected, maxClients+2)
 	}
 	time.Sleep(100 * time.Millisecond)
 	deadline := time.Now().Add(8 * time.Second)
