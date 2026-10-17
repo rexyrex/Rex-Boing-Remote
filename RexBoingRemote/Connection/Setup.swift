@@ -299,6 +299,7 @@ final class Setup: ObservableObject {
     /// explanation, which says what to do if the server needs more (on
     /// Linux, lingering for the user's services).
     func setBackgroundHistory(_ server: Server, enabled: Bool) async throws -> (message: String, upgraded: Bool) {
+        if Demo.isActive { throw Failure(message: Demo.setupRefusal) }
         isRunning = true
         defer { isRunning = false }
         let command = enabled ? "install-service" : "uninstall-service"
