@@ -8,6 +8,7 @@ import Foundation
 /// connects, so it is never duplicated or second-guessed here.
 enum SSHConfigHosts {
     static func load() -> [String] {
+        if Demo.isActive { return Demo.configHosts }
         let home = NSHomeDirectory()
         var seen = Set<String>()
         var result: [String] = []

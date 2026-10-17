@@ -311,6 +311,10 @@ final class SSHBrowser: ObservableObject {
 
     func start() {
         guard browser == nil else { return }
+        if Demo.isActive {
+            found = Demo.nearbyHosts
+            return
+        }
         let browser = NWBrowser(for: .bonjour(type: "_ssh._tcp", domain: nil), using: .tcp)
         let reference = WeakReference(self)
         browser.browseResultsChangedHandler = { results, _ in

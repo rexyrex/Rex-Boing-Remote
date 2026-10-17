@@ -134,8 +134,9 @@ private struct FleetRow: View {
         case .connecting: return "Connecting…"
         case .live: return ""
         case .waiting(_, let reason):
-            let since = connection.downSince.map { " Offline \(Format.duration(Date().timeIntervalSince($0)))." } ?? ""
-            return reason + since
+            // Under a minute, "Offline 0m" would add nothing to the reason.
+            let offline = connection.downSince.map { Date().timeIntervalSince($0) } ?? 0
+            return offline < 60 ? reason : reason + " Offline \(Format.duration(offline))."
         case .attention(let issue): return issue.title
         }
     }

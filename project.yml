@@ -94,5 +94,8 @@ schemes:
         rex-boing-agent: all
     run:
       config: Debug
+      # Tick it in the scheme editor to run against demo mode's recordings.
+      commandLineArguments:
+        "--demo": false
     archive:
       config: Release

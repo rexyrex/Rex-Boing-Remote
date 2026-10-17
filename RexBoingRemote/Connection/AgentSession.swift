@@ -26,6 +26,8 @@ final class AgentSession: @unchecked Sendable {
     private var finished = false
     private let onEvent: @MainActor @Sendable (Event) -> Void
     private let decoder = JSONDecoder()
+    /// In demo mode, the recording that plays ssh's part; no process runs.
+    private let replay: Replay?
 
     /// The child's process id, once started. Used to stop exactly this
     /// process and nothing else.
@@ -33,6 +35,7 @@ final class AgentSession: @unchecked Sendable {
 
     init(arguments: [String], onEvent: @escaping @MainActor @Sendable (Event) -> Void) {
         self.onEvent = onEvent
+        replay = Demo.isActive ? Replay(arguments: arguments) : nil
         process.executableURL = URL(fileURLWithPath: SSH.ssh)
         process.arguments = arguments
         process.environment = SSH.backgroundEnvironment()
@@ -56,13 +59,19 @@ final class AgentSession: @unchecked Sendable {
             guard let self else { return }
             self.queue.async { self.receiveError(data) }
         }
-        process.terminationHandler = { [weak self] process in
-            let status = process.terminationStatus
+        let exited: @Sendable (Int32) -> Void = { [weak self] status in
             guard let self else { return }
             // A moment for the read handlers to hand over what the child wrote
             // last — often the one line of stderr that explains the exit.
             self.queue.asyncAfter(deadline: .now() + 0.15) { self.finish(status: status) }
         }
+        if let replay {
+            replay.start(
+                stdin: stdinPipe.fileHandleForReading, stdout: stdoutPipe.fileHandleForWriting,
+                stderr: stderrPipe.fileHandleForWriting, onExit: exited)
+            return
+        }
+        process.terminationHandler = { process in exited(process.terminationStatus) }
         try process.run()
         pid = process.processIdentifier
     }
@@ -97,6 +106,10 @@ final class AgentSession: @unchecked Sendable {
 
     /// Stops immediately, for a session that has gone silent.
     func kill() {
+        if let replay {
+            replay.terminate()
+            return
+        }
         queue.async { [self] in
             guard !finished, process.isRunning else { return }
             process.terminate()

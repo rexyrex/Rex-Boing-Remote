@@ -22,6 +22,8 @@ enum AppKey {
 
     /// The public key line, creating the key pair on first use.
     static func publicKey() throws -> String {
+        // Demo mode shows a made-up key and never creates the real one.
+        if Demo.isActive { return Demo.publicKey }
         let fileManager = FileManager.default
         if !fileManager.fileExists(atPath: Paths.privateKey.path)
             || !fileManager.fileExists(atPath: Paths.publicKey.path) {
@@ -69,6 +71,10 @@ enum Run {
         _ executable: String, _ arguments: [String],
         environment: [String: String]? = nil, input: Data? = nil, timeout: TimeInterval = 30
     ) -> Result {
+        // Demo mode never reaches a real server, whatever asks it to.
+        if Demo.isActive, executable == SSH.ssh || executable == SSH.sftp {
+            return Result(status: 255, stdout: "", stderr: Demo.setupRefusal)
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments

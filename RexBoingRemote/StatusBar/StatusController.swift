@@ -110,16 +110,9 @@ final class StatusController: NSObject, NSPopoverDelegate {
         fleetItem.animate = settings.animate
         fleetItem.load = fleet.busiestLoad
         fleetItem.isAsleep = total > 0 && live == 0
-        if settings.showFleetReadout && total > 0 {
-            let caption = fleet.needsAttention ? "!\(live)/\(total)" : "\(live)/\(total)"
-            let value = live > 0 ? Format.percent(fleet.busiestLoad) : "—"
-            fleetItem.readout = ReadoutCell(
-                caption: caption, value: value,
-                tint: fleet.needsAttention ? NSColor.systemOrange : nil,
-                width: StatusBarRenderer.width(value: "100%", caption: "!99/99"))
-        } else {
-            fleetItem.readout = nil
-        }
+        fleetItem.readout = settings.showFleetReadout && total > 0
+            ? Self.fleetReadout(live: live, total: total, load: fleet.busiestLoad, needsAttention: fleet.needsAttention)
+            : nil
         fleetItem.toolTip = total == 0
             ? "Rex Boing Remote — add a server to start"
             : "Rex Boing Remote — \(live) of \(total) servers live"
@@ -150,6 +143,17 @@ final class StatusController: NSObject, NSPopoverDelegate {
             item.readout = Self.readout(for: server, snapshot: isLive ? snapshot : nil, unit: settings.temperatureUnit)
             item.toolTip = "\(server.name) — \(Self.stateText(connection?.state ?? .idle))"
         }
+    }
+
+    /// The fleet rex's readout: how many servers are live, and the busiest
+    /// one's CPU.
+    static func fleetReadout(live: Int, total: Int, load: Double, needsAttention: Bool) -> ReadoutCell {
+        let caption = needsAttention ? "!\(live)/\(total)" : "\(live)/\(total)"
+        let value = live > 0 ? Format.percent(load) : "—"
+        return ReadoutCell(
+            caption: caption, value: value,
+            tint: needsAttention ? NSColor.systemOrange : nil,
+            width: StatusBarRenderer.width(value: "100%", caption: "!99/99"))
     }
 
     static func readout(for server: Server, snapshot: Snapshot?, unit: TemperatureUnit) -> ReadoutCell? {

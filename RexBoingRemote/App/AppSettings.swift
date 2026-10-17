@@ -9,7 +9,10 @@ import ServiceManagement
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
-    private let defaults = UserDefaults.standard
+    /// Demo mode keeps its own preferences, so trying it changes none of yours.
+    private let defaults = Demo.isActive
+        ? UserDefaults(suiteName: Demo.defaultsSuite) ?? .standard
+        : .standard
 
     /// Seconds between samples while a server is only in the menu bar or the
     /// fleet list. An open dashboard always samples every second.
@@ -59,6 +62,7 @@ final class AppSettings: ObservableObject {
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
+        guard !Demo.isActive else { return }
         do {
             if enabled {
                 try SMAppService.mainApp.register()

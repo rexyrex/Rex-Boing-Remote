@@ -6,9 +6,19 @@ import Combine
 @MainActor
 final class ServerStore: ObservableObject {
     @Published private(set) var servers: [Server] = []
+    /// False for demo mode's list, which never touches the saved one.
+    private let persistent: Bool
 
     init() {
+        persistent = true
         load()
+    }
+
+    /// A list that lives only in memory: nothing is read from disk, and no
+    /// change is ever written.
+    init(inMemory servers: [Server]) {
+        persistent = false
+        self.servers = servers
     }
 
     func server(_ id: Server.ID) -> Server? {
@@ -67,6 +77,7 @@ final class ServerStore: ObservableObject {
     }
 
     private func save() {
+        guard persistent else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(File(servers: servers)) else { return }

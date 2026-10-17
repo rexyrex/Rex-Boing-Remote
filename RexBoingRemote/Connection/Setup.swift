@@ -84,6 +84,7 @@ final class Setup: ObservableObject {
     /// copies the matching agent, installs the app's restricted key, and
     /// checks that the key alone now starts the agent.
     func add(destination rawDestination: String, name: String?, port: Int?, existing: Server? = nil) async throws -> Server {
+        if Demo.isActive { throw Failure(message: Demo.setupRefusal) }
         isRunning = true
         defer { isRunning = false; if step != .done { step = nil } }
         let destination = rawDestination.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -210,6 +211,7 @@ final class Setup: ObservableObject {
     /// Adds a server that already ran the install command with this Mac's
     /// key: pins its host keys and checks that one of its addresses answers.
     func add(code: PairingCode, existing: Server? = nil) async throws -> Server {
+        if Demo.isActive { throw Failure(message: Demo.setupRefusal) }
         isRunning = true
         defer { isRunning = false; if step != .done { step = nil } }
         step = .connecting
@@ -258,6 +260,7 @@ final class Setup: ObservableObject {
     /// Replaces the agent on a server with the one bundled in this app,
     /// through the restricted key's own upgrade command.
     func upgrade(_ server: Server) async throws {
+        if Demo.isActive { throw Failure(message: Demo.setupRefusal) }
         guard server.auth == .appKey, let os = server.os, let arch = server.arch ?? (os == "darwin" ? "arm64" : nil),
               let agent = BundledAgent.file(os: os, arch: arch),
               let data = try? Data(contentsOf: agent.url) else {
@@ -278,6 +281,8 @@ final class Setup: ObservableObject {
     /// Asks the agent to remove its key and itself. Best effort: a server
     /// that is down keeps its agent, which is inert without the app.
     func uninstall(_ server: Server) async -> Bool {
+        // A demo server has nothing to remove: it only ever existed in memory.
+        if Demo.isActive { return true }
         let target = SSH.Target.forServer(server)
         let command = server.auth == .appKey ? ["uninstall"] : [server.remoteAgentPath + " uninstall"]
         let result = await Run.async(

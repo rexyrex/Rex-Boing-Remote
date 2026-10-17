@@ -2,6 +2,17 @@
 
 Your servers in the Mac menu bar, each with its own running rex.
 
+<p align="center"><img src="docs/menubar.png" width="548" alt="Three menu bar items: a ninja for a gaming PC with its GPU load, a rex for a home server with its CPU, and the fleet rex with how many servers are live and the busiest one's CPU."></p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/fleet.png" alt="The fleet list: a home server flagged for a reboot, a gaming PC, and a Mac mini, each with CPU, memory, GPU, temperature and power, and a Raspberry Pi that isn't answering."></td>
+    <td width="50%" valign="top"><img src="docs/dashboard.png" alt="The home server's dashboard: processor, graphics, memory and thermals cards with their history, pressure stall, a system card saying a restart is needed for a new kernel, and the top processes."></td>
+  </tr>
+</table>
+
+<sub>The pictures come from the app's own views in demo mode: the servers are made up, the interface is real. See <a href="CONTRIBUTING.md#demo-mode-no-servers-needed">CONTRIBUTING.md</a>.</sub>
+
 Rex Boing Remote watches Linux, macOS and Windows machines over the SSH you
 already use, and shows them with the cards and characters of
 [Rex Boing](https://github.com/rexyrex/Rex-Boing): CPU per core, GPU engines,
@@ -35,6 +46,13 @@ unzip it and move it to Applications. It is signed and notarized.
 ## Add a server
 
 Open the app; the Add Server window comes up on its own the first time.
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/add-server-ssh.png" alt="Add a Server, over SSH: the hosts from ~/.ssh/config and the machines on the network that accept SSH, or a user@host to type."></td>
+    <td width="50%" valign="top"><img src="docs/add-server-code.png" alt="Add a Server, from the server's own end: the one command to run there, with this Mac's key in it, and a field for the pairing code it prints."></td>
+  </tr>
+</table>
 
 **If you can already `ssh` to it**, pick it from the list (your
 `~/.ssh/config` hosts and the machines on your network that accept SSH) or
@@ -79,6 +97,8 @@ Windows (Settings › System › Optional features).
   and when the next try is. *Retry Now* skips the wait.
 
 ## What each kind of server reports
+
+<p align="center"><img src="docs/dashboard-lower.png" width="440" alt="Further down a dashboard: the top processes, power, network with the server's address, storage, and every filesystem with its free space."></p>
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
@@ -145,8 +165,9 @@ cd agent && go test ./...   # the Go agent's tests
 ```
 
 To work on Rex Boing's shared code at the same time, point the build at your
-checkout: `REX_BOING_PATH=../Rex-Boing Scripts/build.sh`. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+checkout: `REX_BOING_PATH=../Rex-Boing Scripts/build.sh`. No servers to try it
+on? `open "dist/Rex Boing Remote.app" --args --demo` starts it with made-up
+ones. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

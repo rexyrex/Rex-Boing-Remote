@@ -27,10 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var status: StatusController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // One copy at a time: a second launch hands over to the first.
+        // One copy at a time: a second launch hands over to the first. A demo
+        // copy shares nothing with a real one, so each hands over only to its
+        // own kind, and the two can run side by side.
         let bundleID = Bundle.main.bundleIdentifier ?? ""
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            .filter { Demo.isMarked($0.processIdentifier) == Demo.isActive }
         if let running = others.first {
             // The running copy shows its window when it is reopened.
             NSWorkspace.shared.openApplication(at: running.bundleURL ?? Bundle.main.bundleURL,
@@ -39,8 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if Demo.isActive { Demo.mark() }
+
         let settings = AppSettings.shared
-        let store = ServerStore()
+        let store = Demo.isActive ? ServerStore(inMemory: Demo.servers) : ServerStore()
         let fleet = Fleet(store: store, settings: settings)
         self.store = store
         self.fleet = fleet
@@ -52,6 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if store.servers.isEmpty {
             status?.openAddServer()
+        }
+        // On a full menu bar the rexes can be hidden; the window always shows.
+        if Demo.isActive {
+            status?.openWindow()
         }
     }
 
@@ -65,5 +74,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         fleet?.connections.values.forEach { $0.stop() }
+        if Demo.isActive { Demo.unmark() }
     }
 }

@@ -113,6 +113,57 @@ struct ConnectionCheck {
         check(connection.state == .attention(.hostKeyChanged), "not even by Retry Now")
         connection.stop()
 
+        // Demo mode: the recordings play through the same session and
+        // connection code, the switched-off server waits like a real one, and
+        // nothing ever runs ssh.
+        Demo.isActive = true
+        Demo.recordingsDirectory = URL(fileURLWithPath: "RexBoingRemote/Demo/Recordings")
+        Replay.speed = 4
+        let demoCounter = FileManager.default.temporaryDirectory.appendingPathComponent("fake-ssh-demo-\(getpid())")
+        try? FileManager.default.removeItem(at: demoCounter)
+        setenv("FAKE_SSH_SCENARIO", "steady", 1)
+        setenv("FAKE_SSH_COUNTER", demoCounter.path, 1)
+        let demo = Demo.machines.map { (agent: $0.agent, connection: ServerConnection(server: $0.server)) }
+        demo.forEach { $0.connection.start() }
+        func demoSettled() -> Bool {
+            demo.allSatisfy { machine in
+                switch machine.agent {
+                case .recording: return machine.connection.state == .live && machine.connection.history.cpu.count >= 10
+                case .unreachable: if case .waiting = machine.connection.state { return true } else { return false }
+                }
+            }
+        }
+        var deadline = Date().addingTimeInterval(20)
+        while Date() < deadline && !demoSettled() { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        for machine in demo {
+            let connection = machine.connection
+            switch machine.agent {
+            case .recording(let name):
+                check(connection.state == .live && connection.history.cpu.count >= 10 && connection.hello?.host?.hostname != nil,
+                      "demo \(name) plays (\(connection.history.cpu.count) samples, \(connection.state))")
+            case .unreachable:
+                if case .waiting(_, let reason) = connection.state {
+                    check(reason == "The server isn't answering." && connection.hello == nil,
+                          "the switched-off demo server waits to retry (\(reason))")
+                } else {
+                    check(false, "the switched-off demo server waits to retry (\(connection.state))")
+                }
+            }
+        }
+        // An open dashboard asks for everything, and the process table comes.
+        let dashboard = demo[0].connection
+        dashboard.demand = .full
+        deadline = Date().addingTimeInterval(8)
+        while Date() < deadline && dashboard.processHistory.samples.count < 2 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        check(dashboard.processHistory.samples.count >= 2,
+              "a demo dashboard gets the process table (\(dashboard.processHistory.samples.count) tables)")
+        demo.forEach { $0.connection.stop() }
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        check(!FileManager.default.fileExists(atPath: demoCounter.path), "demo mode never runs ssh")
+        check(Run.sync(SSH.ssh, ["-V"]).status == 255, "and refuses to, whatever asks")
+
         print(failures == 0 ? "All connection checks passed." : "\(failures) connection check(s) failed.")
         exit(failures == 0 ? 0 : 1)
     }
