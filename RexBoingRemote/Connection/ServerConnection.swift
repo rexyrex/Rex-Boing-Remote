@@ -83,6 +83,27 @@ final class ServerConnection: ObservableObject, Identifiable {
     /// gets one coherent pair per sample.
     private(set) var history = MetricsHistory()
     let processHistory = ProcessHistory()
+    /// The long record behind the History card: 15 minutes of samples, 4
+    /// hours of half-minutes, 48 hours of 5-minute points. Filled from the
+    /// samples this app sees, and from the server's background agent, when
+    /// one runs, for the time the app was away. Updated with `history`.
+    private(set) var rings = HistoryRings(interval: 2)
+    /// The busiest process table of every quarter hour, from the server's
+    /// background agent. Replaced by each history message.
+    private(set) var awayProcesses = ProcessHistory()
+    /// Whether the server's background agent answered in this session.
+    @Published private(set) var background: Background = .unknown
+    /// When the last history message arrived.
+    private(set) var historyReceivedAt: Date?
+
+    enum Background: Equatable {
+        /// No session has got far enough to tell.
+        case unknown
+        /// The agent sent a history message: one runs, since `since`.
+        case running(since: Date)
+        /// The session's first sample came without one.
+        case absent
+    }
     @Published private(set) var hello: WireHello?
     @Published private(set) var notices: [String: String] = [:]
     @Published private(set) var lastSampleAt: Date?
@@ -106,6 +127,8 @@ final class ServerConnection: ObservableObject, Identifiable {
     private var retryTimer: Timer?
     private var startedAt: Date?
     private var sawHello = false
+    private var sawHistory = false
+    private var sawSample = false
     private var avoidAgent = true
 
     init(server: Server) {
@@ -131,6 +154,8 @@ final class ServerConnection: ObservableObject, Identifiable {
         retryTimer = nil
         stopping = false
         sawHello = false
+        sawHistory = false
+        sawSample = false
         state = .connecting
         startedAt = Date()
         let target = SSH.Target.forServer(server, address: currentAddress)
@@ -261,6 +286,8 @@ final class ServerConnection: ObservableObject, Identifiable {
         switch event {
         case .message(let message):
             handle(message)
+        case .history(let wire):
+            receive(wire)
         case .ended(let status, let stderr):
             session = nil
             guard !stopping else { return }
@@ -282,9 +309,19 @@ final class ServerConnection: ObservableObject, Identifiable {
             }
             sendDemand()
         case .sample(let sample):
+            if !sawSample {
+                sawSample = true
+                // The agent sends its history between the hello and the
+                // first sample, so by now there either was one or not.
+                if !sawHistory { background = .absent }
+            }
             let previous = snapshot
             let next = Snapshot(sample: sample, host: hello?.host, previous: previous)
-            if sample.resync != true { history.record(next) }
+            if sample.resync != true {
+                history.record(next)
+                rings.interval = sample.interval ?? rings.interval
+                rings.add(sample)
+            }
             if sample.processes != nil { processHistory.record(next) }
             snapshot = next
             lastSampleAt = Date()
@@ -298,6 +335,58 @@ final class ServerConnection: ObservableObject, Identifiable {
         case .other:
             break
         }
+    }
+
+    // MARK: - History
+
+    /// Takes in a background agent's history: its points replace the app's
+    /// own over the time they cover, the dashboard's graphs start from its
+    /// latest points, and its process tables become `awayProcesses`.
+    private func receive(_ wire: WireHistory) {
+        let first = !sawHistory
+        sawHistory = true
+        historyReceivedAt = Date()
+        rings.merge(wire)
+        // Since when the server has kept history: its own oldest point (it
+        // may predate this run of the background agent, saved across a
+        // restart), not anything this app recorded itself.
+        let oldest = (wire.tiers ?? []).compactMap { $0.t?.first }.min()
+        let since = [oldest, wire.started].compactMap { $0 }.min()
+            .map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? Date()
+        background = .running(since: since)
+
+        let host = hello?.host
+        let memory = host?.memoryBytes
+        if first {
+            // The cards' graphs would otherwise start empty after every
+            // reconnect; the samples the agent took in the meantime fill
+            // them instead. Later refreshes leave them to the live samples.
+            var backfilled = MetricsHistory()
+            for point in rings.fine.points.suffix(MetricsHistory.capacity) {
+                backfilled.record(Snapshot(sample: point.sample(step: rings.interval, memoryTotal: memory), host: host))
+            }
+            history = backfilled
+        }
+        let tables = ProcessHistory()
+        for table in rings.processes {
+            guard let at = table.sampledAt else { continue }
+            var sample = rings.point(containing: at).map { $0.point.sample(step: $0.step, memoryTotal: memory) } ?? WireSample()
+            sample.t = at
+            sample.processes = table
+            tables.record(Snapshot(sample: sample, host: host))
+        }
+        awayProcesses = tables
+        objectWillChange.send()
+    }
+
+    /// Asks the background agent for what it kept since the last history
+    /// message, for an open dashboard. Only sent to agents that sent one:
+    /// older agents read any unknown "want" as vitals.
+    func refreshHistory(olderThan age: TimeInterval = 60) {
+        guard let session, sawHistory, case .running = background else { return }
+        if let received = historyReceivedAt, Date().timeIntervalSince(received) < age { return }
+        historyReceivedAt = Date()
+        session.send(["want": "history"])
     }
 
     private func sendDemand() {

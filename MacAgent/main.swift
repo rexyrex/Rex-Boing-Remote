@@ -21,6 +21,9 @@ func usage() -> Never {
           rex-boing-agent install [--key KEY] [--label NAME]
           rex-boing-agent upgrade --sha256 HEX --size N
           rex-boing-agent uninstall
+          rex-boing-agent serve [--interval S]    keep history in the background (optional)
+          rex-boing-agent install-service         run serve as a LaunchAgent, now and at every login
+          rex-boing-agent uninstall-service       stop it and delete the history it kept
 
         """.utf8))
     exit(2)
@@ -63,26 +66,65 @@ func run(_ args: [String]) -> Never {
         exit(0)
     case "upgrade":
         guard let sha = option("--sha256", in: rest), let size = option("--size", in: rest).flatMap(Int.init) else { usage() }
-        let result = Manage.upgrade(sha256: sha, size: size)
+        var result = Manage.upgrade(sha256: sha, size: size)
+        // The background agent still runs the old binary: restart it on the
+        // new one. Its history is saved and reloaded on the way.
+        if result.ok, LaunchAgent.restart() {
+            result.details = (result.details ?? [:]).merging(["service": "restarted"]) { $1 }
+        }
         printJSON(result)
         exit(result.ok ? 0 : 1)
     case "uninstall":
-        let result = Manage.uninstall()
+        // The service first, while the agent it runs still exists.
+        let background = LaunchAgent.uninstall()
+        var result = Manage.uninstall()
+        if !background.ok {
+            result.message = (result.message ?? "") + " The background service was not removed: " + (background.message ?? "")
+        }
+        printJSON(result)
+        exit(result.ok ? 0 : 1)
+    case "serve":
+        BackgroundServer.run(interval: option("--interval", in: rest).flatMap(Double.init) ?? Background.defaultInterval)
+    case "install-service":
+        let result = LaunchAgent.install()
+        printJSON(result)
+        exit(result.ok ? 0 : 1)
+    case "uninstall-service":
+        let result = LaunchAgent.uninstall()
         printJSON(result)
         exit(result.ok ? 0 : 1)
     case "ssh":
-        // The restricted key's forced command: only these, whatever the
-        // client asked for.
+        // The restricted key's forced command: only these, in exactly these
+        // forms, whatever the client asked for.
         let original = ProcessInfo.processInfo.environment["SSH_ORIGINAL_COMMAND"] ?? ""
         let words = original.split(whereSeparator: \.isWhitespace).map(String.init)
-        let allowed: Set<String> = ["stream", "version", "doctor", "upgrade", "uninstall", "pair-code"]
-        guard let first = words.first, allowed.contains(first) else {
-            FileHandle.standardError.write(Data("This key can only run the Rex Boing Remote agent.\n".utf8))
+        guard allowedOverSSH(words) else {
+            FileHandle.standardError.write(Data(("This key can only run the Rex Boing Remote agent (allowed: stream, version, doctor, "
+                + "doctor --json, upgrade, uninstall, pair-code, install-service, uninstall-service).\n").utf8))
             exit(1)
         }
         run(words)
     default:
         usage()
+    }
+}
+
+/// Whether the restricted key may run this command line: the same list,
+/// and the same exact forms, as the Go agent's.
+func allowedOverSSH(_ words: [String]) -> Bool {
+    guard let first = words.first else { return false }
+    switch first {
+    case "stream", "version", "uninstall", "pair-code", "install-service", "uninstall-service":
+        return words.count == 1
+    case "doctor":
+        return words.count == 1 || words == ["doctor", "--json"]
+    case "upgrade":
+        guard words.count == 5 else { return false }
+        let flags = Dictionary([(words[1], words[2]), (words[3], words[4])], uniquingKeysWith: { first, _ in first })
+        guard flags.count == 2, let sha = flags["--sha256"], let size = flags["--size"].flatMap(Int.init) else { return false }
+        return sha.count == 64 && sha.allSatisfy(\.isHexDigit) && size > 0
+    default:
+        return false
     }
 }
 
@@ -155,8 +197,11 @@ enum Stream {
                 let want = object["want"] as? String
                 let interval = object["interval"] as? Double ?? (object["interval"] as? Int).map(Double.init)
                 queue.async {
-                    if let want {
-                        state.detail = want == "full" ? .full : .vitals
+                    switch want {
+                    case "full": state.detail = .full
+                    case "vitals": state.detail = .vitals
+                    case "history": sendHistory()
+                    default: break
                     }
                     if let value = interval {
                         let clamped = clamp(value)
@@ -180,9 +225,16 @@ enum Stream {
             hello.capabilities = ["cpu", "memory", "gpu", "sensors", "fans", "power", "battery", "processes", "sleep"]
             hello.interval = state.interval
             write(hello)
+            // What a background agent kept while the app was away, if one runs.
+            sendHistory()
             schedule(state)
         }
         dispatchMain()
+    }
+
+    static func sendHistory() {
+        guard let history = Background.history(), history.count < Background.maxLine else { return }
+        writeRaw(history)
     }
 
     static func clamp(_ value: Double) -> Double { min(10, max(0.5, value)) }
@@ -224,6 +276,10 @@ enum Stream {
 
     static func write<T: Encodable>(_ value: T) {
         guard let data = try? encoder.encode(value) else { return }
+        writeRaw(data)
+    }
+
+    static func writeRaw(_ data: Data) {
         do {
             try FileHandle.standardOutput.write(contentsOf: data + Data([0x0A]))
         } catch {
@@ -267,6 +323,7 @@ enum Doctor {
                             detail: "\(snapshot.processes.count) running"))
         let viaSSH = ProcessInfo.processInfo.environment["SSH_CONNECTION"] != nil
         checks.append(Check(name: "Session", ok: true, detail: viaSSH ? "over SSH" : "local"))
+        checks.append(backgroundCheck())
 
         if json {
             printJSON(checks)
@@ -278,6 +335,27 @@ enum Doctor {
             }
         }
         exit(0)
+    }
+}
+
+extension Doctor {
+    static func backgroundCheck() -> Check {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d HH:mm"
+        if let status = Background.status() {
+            var detail = "running (pid \(status.pid), since \(formatter.string(from: Date(timeIntervalSince1970: Double(status.started) / 1000))), "
+                + "sampling every \(String(format: "%g", status.interval)) s)"
+            if let oldest = status.oldest {
+                detail += "; history back to \(formatter.string(from: Date(timeIntervalSince1970: Double(oldest) / 1000)))"
+            }
+            return Check(name: "Background history", ok: true, detail: detail)
+        }
+        if LaunchAgent.installed {
+            return Check(name: "Background history", ok: false, detail: "installed as a LaunchAgent, but not running",
+                         fix: "launchctl print gui/\(getuid())/\(LaunchAgent.label)")
+        }
+        return Check(name: "Background history", ok: true,
+                     detail: "off (optional: Rex Boing Remote › Settings › Servers › Keep history while this Mac is away)")
     }
 }
 

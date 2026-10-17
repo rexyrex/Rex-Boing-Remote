@@ -25,6 +25,11 @@ struct Server: Codable, Identifiable, Hashable, Sendable {
     var arch: String?
     var agentVersion: String?
 
+    /// Whether the user asked for the agent to keep history on the server
+    /// while this Mac is away (a background service there). Optional so
+    /// lists saved before it existed still load.
+    var keepHistory: Bool?
+
     var pinned = false
     var character: Visualizer = .rex
     var readout: Readout = .cpu

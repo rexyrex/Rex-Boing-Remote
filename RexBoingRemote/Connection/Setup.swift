@@ -292,6 +292,54 @@ final class Setup: ObservableObject {
         return Self.result(result.stdout)?.ok == true
     }
 
+    /// Turns the agent's background mode on or off on a server, through
+    /// the same key the stream uses: `install-service` or
+    /// `uninstall-service`. An agent too old to know them is updated first
+    /// (when it was set up with the app's key). Returns the agent's own
+    /// explanation, which says what to do if the server needs more (on
+    /// Linux, lingering for the user's services).
+    func setBackgroundHistory(_ server: Server, enabled: Bool) async throws -> (message: String, upgraded: Bool) {
+        isRunning = true
+        defer { isRunning = false }
+        let command = enabled ? "install-service" : "uninstall-service"
+        let target = SSH.Target.forServer(server)
+        func run() async -> Run.Result {
+            await Run.async(
+                SSH.ssh,
+                SSH.background(target, auth: server.auth, avoidAgent: server.auth == .appKey)
+                    + (server.auth == .appKey ? [command] : [server.remoteAgentPath + " " + command]),
+                environment: SSH.backgroundEnvironment(), timeout: 90)
+        }
+        var result = await run()
+        var upgraded = false
+        if Self.result(result.stdout) == nil, Self.refusedAsUnknown(result.stderr) {
+            // An agent from before background mode: it cannot have a
+            // service to remove, and needs this app's agent to install one.
+            guard enabled else { return ("History was already off.", false) }
+            guard server.auth == .appKey else {
+                throw Failure(message: "This server's agent is too old for background history. Use Repair to update it, then try again.")
+            }
+            try await upgrade(server)
+            upgraded = true
+            result = await run()
+        }
+        guard let parsed = Self.result(result.stdout) else {
+            throw Failure(message: "The server didn't answer.", detail: ServerConnection.explain(stderr: result.stderr, status: result.status))
+        }
+        guard parsed.ok else {
+            throw Failure(message: parsed.message ?? "The server couldn't \(enabled ? "start" : "stop") the background agent.")
+        }
+        return (parsed.message ?? (enabled ? "Keeping history." : "History is off."), upgraded)
+    }
+
+    /// Whether an agent refused a command because it does not know it:
+    /// its forced-command check, or its own usage message.
+    static func refusedAsUnknown(_ stderr: String) -> Bool {
+        let text = stderr.lowercased()
+        return text.contains("only run") || text.contains("can only run") || text.contains("unknown command")
+            || text.contains("usage:")
+    }
+
     // MARK: - Helpers
 
     private func setupRun(

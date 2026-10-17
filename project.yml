@@ -17,8 +17,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "-"
@@ -36,6 +36,8 @@ targets:
         excludes:
           - "Info.plist"
           - "RexBoingRemote.entitlements"
+      # The history message and its rings, shared with the macOS agent.
+      - path: Shared
     settings:
       base:
         PRODUCT_NAME: "Rex Boing Remote"
@@ -76,6 +78,7 @@ targets:
     platform: macOS
     sources:
       - path: MacAgent
+      - path: Shared
     settings:
       base:
         PRODUCT_NAME: rex-boing-agent

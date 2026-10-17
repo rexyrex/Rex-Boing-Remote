@@ -206,6 +206,15 @@ func (c *linuxCollector) Sample(detail wire.Detail) *wire.Sample {
 	return s
 }
 
+// ScanProcesses reads the process table alone (collect.ProcessScanner).
+func (c *linuxCollector) ScanProcesses() (p *wire.Processes) {
+	if !c.hostDone {
+		c.Host() // start times need the boot time
+	}
+	c.guard("processes", func() { p = c.sampleProcesses(time.Now()) }, func() { c.procs = linuxProcState{} })
+	return p
+}
+
 // samplePower combines RAPL, GPU and battery power.
 func (c *linuxCollector) samplePower(interval float64, resync bool, gpus []wire.GPU, bat *wire.Battery) *wire.Power {
 	p := &wire.Power{}

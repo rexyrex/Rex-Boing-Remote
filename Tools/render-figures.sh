@@ -13,7 +13,7 @@ mkdir -p .build/checks
 SOURCES=()
 while IFS= read -r file; do SOURCES+=("$file"); done < <(find RexBoingRemote -name '*.swift' ! -name RemoteApp.swift | sort)
 swiftc -O -swift-version 5 -parse-as-library -I "$P" -o .build/checks/render-figures \
-    Tools/render-figures.swift "${SOURCES[@]}" "$P/RexBoingKit.o" \
+    Tools/render-figures.swift "${SOURCES[@]}" Shared/History.swift "$P/RexBoingKit.o" \
     -framework AppKit -framework SwiftUI -framework IOKit -framework SystemConfiguration \
     -framework QuartzCore -framework Network -framework ServiceManagement
 .build/checks/render-figures "${1:-docs}"

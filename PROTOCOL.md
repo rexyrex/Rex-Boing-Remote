@@ -31,10 +31,13 @@ The agent is one executable with these commands:
 | `install` | Reads one OpenSSH public key line from stdin (or `--key`), adds it to the user's `authorized_keys` restricted to this agent, prints a JSON result. |
 | `pair-code` | Prints a pairing code for this machine (see below). |
 | `upgrade --sha256 HEX --size N` | Reads exactly N bytes of a new agent from stdin, verifies the hash, replaces itself, prints a JSON result. |
-| `uninstall` | Removes the keys it installed and its own files, prints a JSON result. |
-| `ssh` | Entry point used by the restricted key. Runs the command named in `SSH_ORIGINAL_COMMAND` if it is one of `stream`, `version`, `doctor`, `doctor --json`, `upgrade …` or `uninstall`, and refuses anything else. |
+| `uninstall` | Removes the background service (if any), the keys it installed and its own files, prints a JSON result. |
+| `serve [--interval S]` | Optional background mode: samples on its own and keeps history for `stream` to send (see "Background history"). Runs until stopped. |
+| `install-service` | Registers `serve` with the user's own service manager, starts it, prints a JSON result. |
+| `uninstall-service` | Stops and removes that service and deletes the history it kept, prints a JSON result. |
+| `ssh` | Entry point used by the restricted key. Runs the command named in `SSH_ORIGINAL_COMMAND` if it is exactly one of `stream`, `version`, `doctor`, `doctor --json`, `upgrade --sha256 HEX --size N`, `uninstall`, `pair-code`, `install-service` or `uninstall-service`, and refuses anything else, `serve` included. |
 
-JSON results of `install`, `upgrade` and `uninstall` have the shape
+JSON results of `install`, `upgrade`, `uninstall`, `install-service` and `uninstall-service` have the shape
 `{"ok":true,"message":"…", …}` or `{"ok":false,"error":"code","message":"…"}`.
 
 ## The restricted key
@@ -102,6 +105,7 @@ to draw from the samples themselves.
 ```json
 {"want":"vitals"}
 {"want":"full"}
+{"want":"history"}
 {"interval":2}
 ```
 
@@ -110,6 +114,9 @@ to draw from the samples themselves.
 * `full`: everything, including processes, for an open dashboard. Agents may
   sample processes and sensors less often than every tick and repeat the
   last values in between.
+* `history`: send a fresh history message now. It does not change the
+  detail. The app only asks agents that sent a history message in this
+  session; an agent without background history ignores it.
 * `interval`: seconds between samples, clamped by the agent to 0.5–10.
 
 The agent applies a request from its next sample on.
@@ -241,6 +248,107 @@ secrets (tokens, passwords, keys) from `cmd` before sending it.
 ```json
 {"type":"notice","code":"rapl-denied","message":"CPU power needs read access to /sys/class/powercap. Run: rex-boing-agent doctor"}
 ```
+
+### history (agent → app, optional)
+
+Sent right after the hello, before the first sample, when a background agent
+(`serve`) is running for the user, and again whenever the app asks with
+`{"want":"history"}`. An agent without one sends nothing, so the app knows
+from the first sample that there is none. Every key is optional.
+
+```json
+{"type":"history","started":1792201150897,"interval":2,
+ "tiers":[
+   {"step":2,  "t":[1792201152897,1792201154897], "cpu":[0.0269,0.0097], "memory":[0.4113,0.4114], "cpuCelsius":[53,null]},
+   {"step":30, "t":[1792201170000], "cpu":[0.0183], "cpuPeak":[0.0291], "memory":[0.4113]},
+   {"step":300,"t":[], "cpu":[]}],
+ "processes":[{"count":755,"sampledAt":1792201166922,"interval":15.977,"gpuAttribution":false,
+               "rows":[{"pid":3176958,"name":"node","user":"alex","cmd":"node server.js","cpu":5.9,"memory":568586240}],
+               "rank":{"cpu":[3176958],"memory":[3176958]}}]}
+```
+
+* `started`: when this background agent began, ms since the epoch.
+* `interval`: seconds between its samples.
+* `tiers`: finest first. Each is columnar: `t` lists the points' times (ms
+  since the epoch, oldest first), and every series has one value per time,
+  `null` where that reading was unavailable. A series the machine never
+  reported is left out. A point covers the `step` seconds that end at its
+  time. Windows are aligned to the epoch, so 5-minute points fall on :00,
+  :05 and so on. Gaps (the machine was off) are simply missing points.
+
+  | Tier | Step | Kept |
+  |---|---|---|
+  | 1 | the background interval (2 s by default) | 15 minutes, every sample |
+  | 2 | 30 s | 4 hours, means of the samples in each window |
+  | 3 | 300 s | 48 hours, means of the samples in each window |
+
+  Windows still open are not sent. Samples marked `resync` are not recorded.
+
+  | Series | Meaning |
+  |---|---|
+  | `cpu`, `cpuUser`, `cpuSystem` | fractions of all cores (`cpu.total`, `user`, `system`) |
+  | `cpuPeak` | the highest single-sample `cpu` in the window (tiers 2 and 3) |
+  | `memory`, `swap` | fractions in use (`used / total`) |
+  | `gpu` | the first GPU's utilization |
+  | `cpuCelsius` | `thermal.cpuCelsius`, else `socCelsius` |
+  | `gpuCelsius` | `thermal.gpuCelsius` |
+  | `watts` | whole-machine power: `systemTotalWatts`, else `systemWatts`, else `packageWatts` |
+  | `rx`, `tx`, `read`, `write` | network and disk bytes per second |
+
+* `processes`: for every quarter hour of the last 24 hours, the process table
+  of its busiest moment (the most CPU across the processes listed), in the
+  same shape as a sample's `processes`, trimmed to the five leaders by CPU
+  and the five by memory. `interval` is the window that table measured.
+
+The message fits in one line of at most 1 MiB: an agent leaves out the
+process tables, then the finest tier, before it would exceed that.
+
+## Background history
+
+Without help, an agent only samples while the app is connected. Background
+history keeps a server sampling while the Mac sleeps or is away, so the
+dashboard can show what happened in the meantime. It is optional, and
+everything else works without it.
+
+`serve` samples vitals every 2 seconds (`--interval`, 0.5–10), and the process
+table every 15 seconds, into the rings the history message describes. It:
+
+* saves them to `history.json` in the install directory, through a temporary
+  file and a rename, every 10 minutes and when it stops (SIGTERM, Ctrl-C, or a
+  `stop` request), and loads them when it starts, so history survives
+  restarts and reboots. The file is the history message itself, mode 0600;
+* answers on a local endpoint only, never a TCP port:
+  * Linux and macOS: the Unix socket `<install dir>/run/serve.sock`, mode
+    0600, in a directory of mode 0700 owned by the user. Connections from
+    other users are refused (`SO_PEERCRED`, `getpeereid`). When a long home
+    directory makes that path too long for a socket, it is
+    `rex-boing-remote-<uid>/serve.sock` in the temporary directory instead,
+    with the same checks;
+  * Windows: the named pipe `\\.\pipe\rex-boing-remote-<user SID>`, owned by
+    the user, with an ACL that grants only the user, and closed to remote
+    clients. Clients check the pipe's owner before they use it.
+* runs once per user: a second `serve` waits up to 5 seconds for the first to
+  finish (a restart), then exits cleanly.
+
+The endpoint speaks one request line and one answer line per connection:
+`{"want":"history"}` (the history message), `{"want":"status"}`
+(`{"type":"status","pid":…,"version":…,"started":…,"interval":…,"oldest":…,"endpoint":…}`)
+and `{"want":"stop"}` (save and exit).
+
+`stream` asks the endpoint for the history (giving up after 2 seconds) and
+sends it after its hello.
+
+`install-service` runs the installed agent's `serve` with the user's own
+service manager, as the user, without root:
+
+| OS | Service | Notes |
+|---|---|---|
+| Linux | systemd user unit `~/.config/systemd/user/rex-boing-agent.service` | User services stop when the user's last session ends unless lingering is on. The agent turns it on where logind allows (`loginctl enable-linger`), and otherwise its result says to run `sudo loginctl enable-linger <user>` once. No systemd: the result says so. |
+| macOS | LaunchAgent `~/Library/LaunchAgents/com.rexyrex.rex-boing-remote.agent.plist` | Loaded into the GUI session, or the background session when no one is logged in at the Mac, and again at every login. |
+| Windows | Scheduled Task `\Rex Boing Remote agent`, at sign-in | Runs unelevated as the user, while the user is signed in (console or Remote Desktop). |
+
+`upgrade` restarts a running service on the new binary. `uninstall-service`
+and `uninstall` remove the service and the history.
 
 ## Versioning
 

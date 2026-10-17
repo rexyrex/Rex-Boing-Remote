@@ -9,6 +9,10 @@ import RexBoingKit
 final class AgentSession: @unchecked Sendable {
     enum Event: Sendable {
         case message(WireMessage)
+        /// What a background agent kept while the app was away
+        /// (PROTOCOL.md, "Background history"). Decoded here, off the main
+        /// actor: a two-day history is a few hundred kilobytes.
+        case history(WireHistory)
         case ended(status: Int32, stderr: String)
     }
 
@@ -131,8 +135,15 @@ final class AgentSession: @unchecked Sendable {
             let line = buffer[buffer.startIndex..<newline]
             buffer.removeSubrange(buffer.startIndex...newline)
             guard !line.isEmpty else { continue }
-            if let message = WireMessage.decode(Data(line), decoder: decoder) {
+            switch WireMessage.decode(Data(line), decoder: decoder) {
+            case .other("history"):
+                if let history = try? decoder.decode(WireHistory.self, from: Data(line)) {
+                    deliver(.history(history))
+                }
+            case let message?:
                 deliver(.message(message))
+            case nil:
+                break
             }
         }
         if buffer.count > Self.maximumLine {

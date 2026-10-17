@@ -13,7 +13,7 @@ import (
 
 func TestSSHCommand(t *testing.T) {
 	sha := strings.Repeat("ab", 32)
-	allowed := []string{"stream", "version", "doctor", "doctor --json", "uninstall", "pair-code",
+	allowed := []string{"stream", "version", "doctor", "doctor --json", "uninstall", "pair-code", "install-service", "uninstall-service",
 		"upgrade --sha256 " + sha + " --size 123", "upgrade --size=123 --sha256=" + sha, "  stream  "}
 	for _, cmd := range allowed {
 		if _, err := sshCommand(cmd); err != nil {
@@ -22,7 +22,7 @@ func TestSSHCommand(t *testing.T) {
 	}
 	refused := []string{"", "   ", "bash", "stream --count 1", "doctor --verbose", "install --key x", "ssh", "version; rm -rf ~",
 		"upgrade", "upgrade --sha256 " + sha, "upgrade --sha256 " + sha + " --size 0", "upgrade --sha256 x --size 5 extra",
-		"scp -t /tmp", "rsync --server", "sftp-server"}
+		"scp -t /tmp", "rsync --server", "sftp-server", "serve", "serve --interval 0.5", "install-service --now", "uninstall-service x"}
 	for _, cmd := range refused {
 		_, err := sshCommand(cmd)
 		if err == nil {

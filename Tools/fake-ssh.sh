@@ -19,6 +19,13 @@ stream() {
 case "$FAKE_SSH_SCENARIO" in
     steady)
         stream 1000 ;;
+    history)
+        # An agent with a background agent behind it: the history line
+        # comes between the hello and the first sample.
+        echo "$hello"
+        cat "$FAKE_SSH_HISTORY"
+        echo
+        for i in $(seq 1 1000); do sample "$i"; sleep 0.3; done ;;
     drop-then-recover)
         if [ "$n" -le 2 ]; then
             stream 2

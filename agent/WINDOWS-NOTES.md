@@ -229,6 +229,35 @@ else none); bootTime = now − GetTickCount64.
   without a gateway skipped) ordered by `orderPairAddresses`, then
   `<hostname>.local`. Produced whether or not sshd is running.
 
+## Background history (serve, install-service)
+
+* Endpoint: named pipe `\\.\pipe\rex-boing-remote-<user SID>`
+  (`internal/serve/ipc_windows.go`). Security descriptor
+  `O:<SID>D:P(A;;GA;;;<SID>)`: owned by the user, protected DACL granting
+  only the user. `PIPE_REJECT_REMOTE_CLIENTS`. The first instance uses
+  `FILE_FLAG_FIRST_PIPE_INSTANCE` (a name someone else created first makes
+  `serve` fail rather than join it); each next instance is created while the
+  previous one still holds the name. All I/O is overlapped with an event, so
+  reads and writes time out (`CancelIoEx` + `GetOverlappedResult`) and Close
+  interrupts `ConnectNamedPipe` through a second event. Clients open with
+  `SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION` and refuse a pipe whose
+  owner (`GetSecurityInfo`, `OWNER_SECURITY_INFORMATION`) is not their SID.
+* Service: `schtasks /Create /TN "\Rex Boing Remote agent" /XML <file> /F`
+  with a UTF-16LE task definition (`internal/service/service.go`, `taskXML`):
+  `LogonTrigger` for `DOMAIN\user`, principal = the user's SID,
+  `InteractiveToken`, `LeastPrivilege`, no execution time limit, restart on
+  failure every minute. Then `schtasks /Run`, which only starts it if the user
+  has a desktop session; otherwise the next sign-in does.
+* Restart after `upgrade`: `{"want":"stop"}` on the pipe (serve saves and
+  exits), then `schtasks /Run`. `uninstall-service`: stop, `/End`, `/Delete`,
+  delete `history.json`.
+
+Not verified on real Windows: that a standard (non-admin) user may create a
+task with a per-user logon trigger this way; the SID as principal `UserId`;
+the owner check when the serve runs elevated (it should not: the task is
+`LeastPrivilege`). The pipe round trip itself runs in CI on windows-latest
+(`internal/serve` tests).
+
 ## Layouts verified, and where
 
 | Struct / API | Layout used | Source |

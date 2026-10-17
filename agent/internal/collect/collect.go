@@ -37,3 +37,12 @@ type Check struct {
 
 // New returns the collector for this OS.
 func New() Collector { return newCollector() }
+
+// ProcessScanner is implemented by collectors that can read the process
+// table on its own, without the rest of a full sample. The background agent
+// uses it to keep the busiest processes without paying for sensor lists and
+// volumes. Rates in the table cover the time since the previous scan (or
+// full sample).
+type ProcessScanner interface {
+	ScanProcesses() *wire.Processes
+}

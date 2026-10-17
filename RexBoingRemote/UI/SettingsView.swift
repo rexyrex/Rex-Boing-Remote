@@ -135,6 +135,9 @@ private struct ServerDetail: View {
                 set: { value in store.update(server.id) { $0.readout = value } })) {
                 ForEach(Server.Readout.allCases) { readout in Text(readout.label).tag(readout) }
             }
+            if let connection = fleet.connection(server.id) {
+                BackgroundToggle(server: server, connection: connection, enabled: !setup.isRunning) { setBackground($0) }
+            }
             LabeledContent("Agent", value: agentLine)
             HStack {
                 Button("Reconnect") { fleet.connection(server.id)?.restart() }
@@ -179,6 +182,26 @@ private struct ServerDetail: View {
         }
     }
 
+    /// Installs or removes the agent's background service on the server,
+    /// then reconnects so the stream picks up (or stops expecting) history.
+    private func setBackground(_ enabled: Bool) {
+        message = nil
+        Task {
+            do {
+                let (text, upgraded) = try await setup.setBackgroundHistory(server, enabled: enabled)
+                store.update(server.id) {
+                    $0.keepHistory = enabled
+                    if upgraded { $0.agentVersion = BundledAgent.version }
+                }
+                fleet.connection(server.id)?.restart()
+                message = text
+            } catch {
+                message = (error as? Setup.Failure).map { [$0.message, $0.detail].compactMap { $0 }.joined(separator: "\n") }
+                    ?? error.localizedDescription
+            }
+        }
+    }
+
     private func update() {
         message = nil
         Task {
@@ -190,6 +213,59 @@ private struct ServerDetail: View {
             } catch {
                 message = (error as? Setup.Failure)?.message ?? error.localizedDescription
             }
+        }
+    }
+}
+
+/// "Keep history while this Mac is away", with what the server says about it.
+private struct BackgroundToggle: View {
+    var server: Server
+    @ObservedObject var connection: ServerConnection
+    var enabled: Bool
+    var set: (Bool) -> Void
+
+    var body: some View {
+        Toggle(isOn: Binding(get: { isOn }, set: set)) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Keep history while this Mac is away")
+                Text(caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .disabled(!enabled)
+    }
+
+    /// The user's choice, or, for a server whose agent was set up to keep
+    /// history some other way, what the server says.
+    private var isOn: Bool {
+        if let choice = server.keepHistory { return choice }
+        if case .running = connection.background { return true }
+        return false
+    }
+
+    private var caption: String {
+        var text = "The agent keeps sampling on the server, 48 hours deep, as a service of your user there "
+            + "(\(manager)). It opens no port. Turning it off deletes what it kept."
+        switch connection.background {
+        case .running(let since):
+            text += " Running, with history since \(HistoryCard.moment(since))."
+        case .absent where server.keepHistory == true:
+            text += server.isWindows
+                ? " Not running now: Windows runs it while someone is signed in to the PC."
+                : " Not running on the server right now."
+        default:
+            break
+        }
+        return text
+    }
+
+    private var manager: String {
+        switch server.os {
+        case "darwin": return "a LaunchAgent"
+        case "windows": return "a scheduled task at sign-in"
+        default: return "a systemd user service"
         }
     }
 }

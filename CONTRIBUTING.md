@@ -12,6 +12,7 @@ read.
 | `RexBoingRemote/` | The Mac app (Swift, SwiftUI and AppKit) |
 | `RexBoingRemote/Demo/` | Demo mode: made-up servers whose agents are recordings |
 | `MacAgent/` | The macOS agent: Rex Boing's samplers, headless |
+| `Shared/` | Swift shared by the app and the macOS agent: background history's rings and message |
 | `agent/` | The Linux and Windows agent (Go) |
 | `PROTOCOL.md` | The contract between the app and every agent |
 | `install.sh`, `install.ps1` | The installers for setting a server up from its own end |

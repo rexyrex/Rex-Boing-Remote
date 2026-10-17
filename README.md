@@ -23,6 +23,10 @@ a reboot or has failed services.
 - **Nothing to open on the server.** No port, no web server, no daemon. The
   app starts a small agent over SSH while it watches, and the agent exits
   when the session ends.
+- **History while you're away, if you want it.** Turn on *Keep history while
+  this Mac is away* for a server, and the agent keeps sampling there as a
+  service of your user (still no port, no root), so the dashboard shows what
+  happened overnight: 48 hours of vitals and the busiest processes.
 - **No root.** The agent runs as the user you log in as. It can only read.
 - **Reconnects by itself.** After your Mac sleeps, after either side reboots,
   after Wi-Fi or a VPN changes.
@@ -95,6 +99,28 @@ Windows (Settings › System › Optional features).
 - Click a rex for the fleet list; click a server for its dashboard.
 - A server that drops off falls asleep in the menu bar, and its row says why
   and when the next try is. *Retry Now* skips the wait.
+
+## History while your Mac is away
+
+Each dashboard has a **History** card: the last 15 minutes, 4 hours or 48
+hours of CPU, memory, temperature, power, network and disk. Point at a moment
+to see the readings then and the busiest processes of that quarter hour.
+
+On its own, the app can only record while it is connected. To fill the gaps
+when your Mac sleeps or leaves home, turn on **Keep history while this Mac is
+away** for a server in Settings › Servers. The app then asks the agent to run
+in the background on that server, as your user:
+
+| Server | Runs as |
+|---|---|
+| Linux | a systemd user service. Your services only keep running after you log out if *lingering* is on; the app says if it isn't, with the one command that turns it on (`sudo loginctl enable-linger <you>`). |
+| macOS | a LaunchAgent, started again at every login. |
+| Windows | a Scheduled Task, started when you sign in, running while you are signed in. |
+
+It samples every 2 seconds, keeps 48 hours (in its own folder, so it survives
+restarts), opens no port, and talks only to a socket only your user can reach.
+On reconnect, the agent sends what it kept and the graphs fill in. Turning the
+setting off removes the service and the history it kept.
 
 ## What each kind of server reports
 

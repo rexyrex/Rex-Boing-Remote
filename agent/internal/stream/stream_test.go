@@ -323,3 +323,48 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+func TestHistoryAfterHello(t *testing.T) {
+	calls := 0
+	var mu sync.Mutex
+	history := func() []byte {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return []byte(`{"type":"history","started":1,"interval":2,"tiers":[]}`)
+	}
+	s := start(t, &fakeCollector{}, Options{Interval: 0.5, History: history})
+	if m := s.next(t); m.Type != "hello" {
+		t.Fatalf("first line %+v", m)
+	}
+	if m := s.next(t); m.Type != "history" {
+		t.Fatalf("second line %+v, want the history", m)
+	}
+	if m := s.next(t); m.Type != "sample" {
+		t.Fatalf("third line %+v", m)
+	}
+	// Asked for again, it comes again; the detail is untouched.
+	io.WriteString(s.in, `{"want":"full"}`+"\n"+`{"want":"history"}`+"\n")
+	sawHistory, sawFull := false, false
+	for i := 0; i < 6 && !(sawHistory && sawFull); i++ {
+		m := s.next(t)
+		sawHistory = sawHistory || m.Type == "history"
+		sawFull = sawFull || (m.Type == "sample" && m.Detail == wire.DetailFull)
+	}
+	if !sawHistory || !sawFull {
+		t.Errorf("after a history request: history %v, full samples %v", sawHistory, sawFull)
+	}
+}
+
+func TestNoHistoryWithoutServe(t *testing.T) {
+	for name, h := range map[string]func() []byte{
+		"none":      func() []byte { return nil },
+		"two lines": func() []byte { return []byte("{\"type\":\"history\"}\n{}") },
+	} {
+		s := start(t, &fakeCollector{}, Options{Interval: 0.5, Count: 1, History: h})
+		s.next(t)
+		if m := s.next(t); m.Type != "sample" {
+			t.Errorf("%s: second line %+v, want a sample", name, m)
+		}
+	}
+}

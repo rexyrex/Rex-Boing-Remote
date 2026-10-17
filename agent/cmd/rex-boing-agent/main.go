@@ -4,17 +4,24 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/collect"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/manage"
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/serve"
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/service"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/stream"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
 )
@@ -34,6 +41,9 @@ Usage:
   rex-boing-agent pair-code
   rex-boing-agent upgrade --sha256 HEX --size N                       (new binary on stdin)
   rex-boing-agent uninstall
+  rex-boing-agent serve [--interval S]          keep history in the background (optional)
+  rex-boing-agent install-service               run serve as this user's service, now and after reboots
+  rex-boing-agent uninstall-service             stop it and delete the history it kept
   rex-boing-agent ssh                                                 (used by the installed key)
 `
 
@@ -70,7 +80,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "upgrade":
 		return cmdUpgrade(rest, stdin, stdout, stderr)
 	case "uninstall":
-		return printResult(stdout, manage.Uninstall())
+		return cmdUninstall(stdout)
+	case "serve":
+		return cmdServe(rest, stderr)
+	case "install-service":
+		return cmdInstallService(rest, stdout, stderr)
+	case "uninstall-service":
+		return printResult(stdout, service.Uninstall(manage.InstallDir()))
 	case "ssh":
 		return cmdSSH(os.Getenv("SSH_ORIGINAL_COMMAND"), stdin, stdout, stderr)
 	case "help", "-h", "--help":
@@ -101,12 +117,16 @@ func cmdStream(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	c := collect.New()
 	defer c.Close()
+	dir := manage.InstallDir()
 	err := stream.Run(c, stdin, stdout, stream.Options{
 		Agent:    agentInfo(),
 		Interval: *interval,
 		Detail:   wire.Detail(*detail),
 		Count:    *count,
 		Log:      stderr,
+		// A background agent, when one runs, has what happened while the
+		// app was away. Without one this costs one failed local connect.
+		History: func() []byte { return serve.History(dir, 2*time.Second) },
 	})
 	if err != nil {
 		// stdout is gone (the session dropped): nothing left to tell anyone.
@@ -136,7 +156,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	defer c.Close()
 	host := c.Host()
 	caps := c.Capabilities()
-	checks := c.Doctor()
+	checks := append(c.Doctor(), backgroundCheck(manage.InstallDir()))
 	if *asJSON {
 		return printJSON(stdout, struct {
 			Agent        wire.AgentInfo  `json:"agent"`
@@ -247,20 +267,111 @@ func cmdUpgrade(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		return printResult(stdout, wire.Result{OK: false, Error: "usage", Message: err.Error()})
 	}
-	return printResult(stdout, manage.Upgrade(stdin, sha, size))
+	r := manage.Upgrade(stdin, sha, size)
+	if r.OK {
+		// The background agent still runs the old binary: restart it on
+		// the new one. Its history is saved and reloaded on the way.
+		restarted, err := service.Restart(manage.InstallDir())
+		switch {
+		case err != nil:
+			r.Message += " The background agent could not be restarted: " + err.Error()
+		case restarted:
+			if r.Details == nil {
+				r.Details = map[string]string{}
+			}
+			r.Details["service"] = "restarted"
+		}
+	}
+	return printResult(stdout, r)
+}
+
+// cmdUninstall removes the background service first, while the agent that
+// runs it still exists, then the keys and the agent.
+func cmdUninstall(stdout io.Writer) int {
+	bg := service.Uninstall(manage.InstallDir())
+	r := manage.Uninstall()
+	if r.Details == nil {
+		r.Details = map[string]string{}
+	}
+	if !bg.OK {
+		r.Message += " The background service was not removed: " + bg.Message
+	} else if bg.Message != "History was already off." {
+		r.Details["service"] = "removed"
+	}
+	return printResult(stdout, r)
+}
+
+func cmdServe(args []string, stderr io.Writer) int {
+	fs := newFlags("serve", stderr)
+	interval := fs.Float64("interval", serve.DefaultInterval, "seconds between samples, 0.5–10")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	c := collect.New()
+	defer c.Close()
+	err := serve.Run(ctx, c, serve.Options{Agent: agentInfo(), Interval: *interval, Dir: manage.InstallDir(), Log: stderr})
+	switch {
+	case errors.Is(err, serve.ErrRunning):
+		fmt.Fprintln(stderr, "rex-boing-agent: already keeping history in the background; nothing to do")
+		return 0
+	case err != nil:
+		fmt.Fprintf(stderr, "rex-boing-agent: serve: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// cmdInstallService registers the installed agent (not a copy running from
+// elsewhere) with the service manager.
+func cmdInstallService(args []string, stdout, stderr io.Writer) int {
+	fs := newFlags("install-service", stderr)
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	dir := manage.InstallDir()
+	path := filepath.Join(dir, manage.ExecutableName())
+	if _, err := os.Stat(path); err != nil {
+		return printResult(stdout, wire.Result{OK: false, Error: "not-installed",
+			Message: "The agent is not installed at " + path + " yet. Add this server in Rex Boing Remote first."})
+	}
+	return printResult(stdout, service.Install(path, dir))
+}
+
+// backgroundCheck is doctor's line about background history.
+func backgroundCheck(dir string) collect.Check {
+	c := collect.Check{Name: "Background history"}
+	if st, err := serve.Query(dir, 2*time.Second); err == nil {
+		c.OK = true
+		c.Detail = fmt.Sprintf("running (pid %d, since %s, sampling every %g s)", st.PID,
+			time.UnixMilli(st.Started).Format("Jan 2 15:04"), st.Interval)
+		if st.Oldest > 0 {
+			c.Detail += fmt.Sprintf("; history back to %s", time.UnixMilli(st.Oldest).Format("Jan 2 15:04"))
+		}
+		return c
+	}
+	if installed, hint := service.Describe(dir); installed {
+		c.Detail = "installed as a service, but not running"
+		c.Fix = hint
+		return c
+	}
+	c.OK = true
+	c.Detail = "off (optional: Rex Boing Remote › Settings › Servers › Keep history while this Mac is away)"
+	return c
 }
 
 // sshCommand checks the command a restricted key's client asked for
 // (SSH_ORIGINAL_COMMAND) against the commands that key may run.
 func sshCommand(original string) ([]string, error) {
-	const allowed = "stream, version, doctor, doctor --json, upgrade, uninstall, pair-code"
+	const allowed = "stream, version, doctor, doctor --json, upgrade, uninstall, pair-code, install-service, uninstall-service"
 	f := strings.Fields(original)
 	if len(f) == 0 {
 		return nil, fmt.Errorf("this key only runs the Rex Boing Remote agent and no command was given (allowed: %s)", allowed)
 	}
 	ok := false
 	switch f[0] {
-	case "stream", "version", "uninstall", "pair-code":
+	case "stream", "version", "uninstall", "pair-code", "install-service", "uninstall-service":
 		ok = len(f) == 1
 	case "doctor":
 		ok = len(f) == 1 || (len(f) == 2 && f[1] == "--json")

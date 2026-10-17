@@ -4,6 +4,7 @@ package stream
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +40,14 @@ type Options struct {
 	Count int
 	// Log receives diagnostics (stderr in the agent); nil discards them.
 	Log io.Writer
+	// History returns the background agent's history message, or nil when
+	// none is running. It is sent right after the hello, and again when the
+	// app asks for it ({"want":"history"}). Nil means never.
+	History func() []byte
 }
+
+// WantHistory is the request for a fresh history message.
+const WantHistory wire.Detail = "history"
 
 // ClampInterval keeps an interval inside MinInterval…MaxInterval.
 func ClampInterval(v float64) float64 {
@@ -54,7 +62,8 @@ func ClampInterval(v float64) float64 {
 	return v
 }
 
-// Run writes a hello and then samples to out until in reaches end of file,
+// Run writes a hello, the background agent's history if one is running, and
+// then samples to out until in reaches end of file,
 // a write fails, or Count samples were sent. It returns nil when in ended or
 // the count was reached, and the write error otherwise.
 //
@@ -86,6 +95,19 @@ func Run(c collect.Collector, in io.Reader, out io.Writer, opts Options) error {
 		Interval:     interval,
 	}
 	if err := w.line(hello); err != nil {
+		return err
+	}
+	sendHistory := func() error {
+		if opts.History == nil {
+			return nil
+		}
+		h := opts.History()
+		if len(h) == 0 || len(h)+1 > MaxLine || bytes.IndexByte(h, '\n') >= 0 {
+			return nil
+		}
+		return w.write(h)
+	}
+	if err := sendHistory(); err != nil {
 		return err
 	}
 
@@ -140,6 +162,11 @@ func Run(c collect.Collector, in io.Reader, out io.Writer, opts Options) error {
 			case r := <-requests:
 				if r.Want == wire.DetailVitals || r.Want == wire.DetailFull {
 					detail = r.Want
+				}
+				if r.Want == WantHistory {
+					if err := sendHistory(); err != nil {
+						return err
+					}
 				}
 				if r.Interval != nil && !math.IsInf(*r.Interval, 0) && !math.IsNaN(*r.Interval) {
 					if v := ClampInterval(*r.Interval); v != interval {

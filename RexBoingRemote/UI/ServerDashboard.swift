@@ -30,7 +30,10 @@ struct ServerDashboard: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear { connection.demand = .full }
+        .onAppear {
+            connection.demand = .full
+            connection.refreshHistory()
+        }
         .onDisappear { connection.demand = .vitals }
         .environment(\.machineNoun, server.os == "darwin" ? "Mac" : "machine")
         .environment(\.processControl, ProcessControl(isLocal: false))
@@ -52,6 +55,9 @@ struct ServerDashboard: View {
                     ThermalCard(snapshot: snapshot, history: history, unit: unit)
                 }
                 .fixedSize(horizontal: false, vertical: true)
+
+                HistoryCard(connection: connection, unit: unit, keepsHistory: server.keepHistory ?? false,
+                            isWindows: server.isWindows, openSettings: openSettings)
 
                 if snapshot.extras.pressure != nil || snapshot.extras.system != nil {
                     HStack(alignment: .top, spacing: Metrics.sectionSpacing) {

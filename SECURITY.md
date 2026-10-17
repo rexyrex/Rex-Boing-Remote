@@ -31,9 +31,33 @@ meant to hold up to anyone reading the code.
   `restrict` disables port, agent and X11 forwarding and the TTY. The forced
   command means the key can only run the agent, and the agent only accepts
   `stream`, `version`, `doctor`, `upgrade` (with a SHA-256 the new binary must
-  match), `uninstall` and `pair-code`.
+  match), `uninstall`, `pair-code`, `install-service` and `uninstall-service`,
+  each in exactly that form.
 - Runs as that user, never as root, and opens no network listener of any kind.
-- Is read-only. It does not signal, change or start anything on the server.
+- Is read-only. It does not signal, change or start anything on the server,
+  with one exception you opt into per server: background history.
+
+## Background history (optional)
+
+*Keep history while this Mac is away* (Settings › Servers) runs
+`install-service` on the server. That registers the agent's `serve` command
+with the user's own service manager (a systemd user unit, a LaunchAgent, or a
+Scheduled Task at sign-in), as the user, without root. While it runs:
+
+- It reads the same vitals the stream does, and the process table every 15
+  seconds, with command lines redacted as in the stream.
+- It keeps them in memory and in `history.json` in the agent's directory
+  (mode 0600), at most 48 hours of vitals and 24 hours of process tables.
+- It answers only on a Unix socket in a directory only the user can enter
+  (mode 0700, socket 0600, peer user checked), or on Windows a named pipe
+  whose ACL admits only the user and no remote clients. Never on a network
+  port. `serve` cannot be started over the restricted key.
+- On Linux, user services stop at logout unless lingering is on; turning it
+  on (`loginctl enable-linger`) lets the user's services run while they are
+  logged out.
+
+Turning the setting off (`uninstall-service`), or removing the agent, stops
+the service and deletes the history file.
 - Strips secrets from process command lines (password and token flags,
   `*_TOKEN=` style variables, credentials in URLs, well-known token formats)
   before sending them.

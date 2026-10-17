@@ -353,6 +353,18 @@ func (c *winCollector) Sample(detail wire.Detail) *wire.Sample {
 	return s
 }
 
+// ScanProcesses reads the process table alone (collect.ProcessScanner).
+// Per-process GPU use comes from the last full sample's counters, if any.
+func (c *winCollector) ScanProcesses() (out *wire.Processes) {
+	c.safe("processes", func() {
+		p, err := c.procs.scan(c.gpuPerPID, c.gpuEngine != nil && c.gpuCollected, false)
+		if err == nil {
+			out = p
+		}
+	})
+	return out
+}
+
 func (c *winCollector) sampleCPU() *wire.CPU {
 	cur, err := winReadCPUTimes(c.groupCounts)
 	if err != nil {
