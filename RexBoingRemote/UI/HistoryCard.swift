@@ -14,7 +14,10 @@ struct HistoryCard: View {
     var isWindows: Bool
     var openSettings: () -> Void
 
-    @AppStorage("historyRange") private var range: HistoryRange = .hours4
+    @AppStorage("historyRange", store: HistoryCard.defaults) private var range: HistoryRange = .hours4
+
+    /// Demo mode keeps its preferences apart from the real ones.
+    private static let defaults: UserDefaults? = Demo.isActive ? UserDefaults(suiteName: Demo.defaultsSuite) : nil
     @StateObject private var hover = HistoryHover()
 
     enum HistoryRange: String, CaseIterable, Identifiable {
