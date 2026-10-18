@@ -244,8 +244,9 @@ struct HistoryTier: Sendable {
 
     /// Replaces this tier's points between the first and last of `other`
     /// with `other`, keeping what lies outside that range: an agent's record
-    /// wins where it has one.
-    mutating func merge(_ other: [HistoryPoint], now ms: Int64) {
+    /// wins where it has one. Then drops what has aged out, unless `prune`
+    /// is false.
+    mutating func merge(_ other: [HistoryPoint], now ms: Int64, prune: Bool = true) {
         var incoming: [HistoryPoint] = []
         for point in other where point.t <= ms && point.t > (incoming.last?.t ?? .min) {
             incoming.append(point)
@@ -254,7 +255,7 @@ struct HistoryTier: Sendable {
         let before = points.filter { $0.t < first }
         let after = points.filter { $0.t > last }
         points = before + incoming + after
-        prune(now: ms)
+        if prune { self.prune(now: ms) }
     }
 }
 
@@ -472,12 +473,32 @@ struct HistoryRings: Sendable {
             guard let step = tier.step else { continue }
             let points = tier.points.filter { $0.t <= nowMS }
             switch step {
-            case Self.mediumStep: medium.merge(points, now: nowMS)
-            case Self.coarseStep: coarse.merge(points, now: nowMS)
-            case 0.1...10: fine.merge(points, now: nowMS)
+            case Self.mediumStep: medium.merge(points, now: nowMS, prune: false)
+            case Self.coarseStep: coarse.merge(points, now: nowMS, prune: false)
+            case 0.1...10: fine.merge(points, now: nowMS, prune: false)
             default: continue
             }
         }
+        // The windows that were open when the rings were saved are in no
+        // coarser tier yet, only in the finest. Fold its points after each
+        // tier's last point into that tier's window again (not into the
+        // finest tier, which has them), so the window that spans a restart
+        // of serve ends with the same point as if it had kept running, and
+        // the app's own open windows match the record it merged. This goes
+        // by the rings before anything ages out: a window that closed while
+        // serve was down still gets all of its points.
+        let saved = fine.points
+        let lastMedium = medium.points.last?.t ?? .min
+        let lastCoarse = coarse.points.last?.t ?? .min
+        fine.prune(now: nowMS)
+        medium.prune(now: nowMS)
+        coarse.prune(now: nowMS)
+        mediumBucket = Bucket()
+        coarseBucket = Bucket()
+        for point in saved where point.t > lastMedium { Self.fold(point, into: &medium, bucket: &mediumBucket) }
+        for point in saved where point.t > lastCoarse { Self.fold(point, into: &coarse, bucket: &coarseBucket) }
+        medium.prune(now: nowMS)
+        coarse.prune(now: nowMS)
         let cut = nowMS - Int64(Self.processSpan * 1000)
         var tables = (wire.processes ?? []).filter { ($0.sampledAt ?? 0) > cut && ($0.sampledAt ?? 0) <= nowMS }
         tables.sort { ($0.sampledAt ?? 0) < ($1.sampledAt ?? 0) }

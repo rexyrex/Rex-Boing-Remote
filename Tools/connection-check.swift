@@ -649,6 +649,32 @@ struct ConnectionCheck {
             check(low == 51 && app.fine.points.count == 99 + 51 + 100 && ordered,
                   "a background agent's points replace the app's where they overlap (\(low) of \(app.fine.points.count))")
 
+            // A serve that restarts mid-window, and is down while one closes,
+            // keeps the same rings as one that ran on with the same samples.
+            let baseMS = Int64(base.timeIntervalSince1970 * 1000)
+            func sample(_ i: Int) -> HistoryPoint {
+                var point = HistoryPoint(t: baseMS + Int64(i) * 2000)
+                point[.cpu] = Double(i % 7) / 7
+                point[.memory] = 0.5
+                return point
+            }
+            var ranOn = HistoryRings(interval: 2, started: base)
+            var restarted = HistoryRings(interval: 2, started: base)
+            for i in 1...113 {
+                ranOn.add(sample(i))
+                restarted.add(sample(i))
+            }
+            let savedRings = restarted.wire()
+            restarted = HistoryRings(interval: 2, started: base)
+            restarted.load(savedRings, now: base.addingTimeInterval(280))
+            for i in 140...200 {
+                ranOn.add(sample(i))
+                restarted.add(sample(i))
+            }
+            check(restarted.encoded() == ranOn.encoded() && restarted.medium.points.count == ranOn.medium.points.count,
+                  "a restart mid-window keeps the windows it spans (\(restarted.medium.points.count) of \(ranOn.medium.points.count) half-minutes, "
+                  + "\(restarted.coarse.points.count) of \(ranOn.coarse.points.count) five-minute points)")
+
             // The half-minute and five minutes the app had open when it went
             // away must not cut the agent's record short when they close.
             var resumed = HistoryRings(interval: 2, started: base)
@@ -664,14 +690,18 @@ struct ConnectionCheck {
                 kept.add(point)
             }
             resumed.merge(kept.wire(), now: base.addingTimeInterval(7200))
-            let merged = (resumed.medium.points.count, resumed.coarse.points.count)
+            let merged = (resumed.medium.points, resumed.coarse.points)
             var next = HistoryPoint(t: Int64(base.timeIntervalSince1970 * 1000) + 7_201_000)
             next[.cpu] = 0.5
             resumed.add(next)
-            check(merged.0 >= 239 && resumed.medium.points.count == merged.0 && resumed.coarse.points.count == merged.1
-                  && resumed.medium.points.last?.t == kept.medium.points.last?.t,
-                  "the first sample after an agent's record keeps all of it (\(resumed.medium.points.count) of \(merged.0) half-minutes, "
-                  + "\(resumed.coarse.points.count) of \(merged.1) five-minute points)")
+            // All of the agent's points, then the window it still had open,
+            // closed by this sample.
+            let windowEnd = Int64(base.timeIntervalSince1970 * 1000) + 7_200_000
+            check(merged.0.count >= 239 && Array(resumed.medium.points.prefix(merged.0.count)) == merged.0
+                  && Array(resumed.coarse.points.prefix(merged.1.count)) == merged.1
+                  && resumed.medium.points.last?.t == windowEnd && resumed.coarse.points.last?.t == windowEnd,
+                  "the first sample after an agent's record keeps all of it (\(resumed.medium.points.count) half-minutes after "
+                  + "\(merged.0.count), \(resumed.coarse.points.count) five-minute points after \(merged.1.count))")
         } else {
             check(false, "agent/internal/history/testdata/history.json is readable")
         }
