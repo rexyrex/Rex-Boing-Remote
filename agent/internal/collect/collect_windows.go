@@ -498,12 +498,6 @@ func (c *winCollector) sampleThermal(lhm *winLHMReading, gpus []wire.GPU, full b
 		fans = lhm.Fans
 		t.CPUCelsius = lhm.CPUCelsius
 	}
-	var peak *float64
-	bump := func(v float64) {
-		if peak == nil || v > *peak {
-			peak = wire.F(v)
-		}
-	}
 	maxOf := func(cat string) *float64 {
 		var m *float64
 		for _, s := range sensors {
@@ -513,24 +507,15 @@ func (c *winCollector) sampleThermal(lhm *winLHMReading, gpus []wire.GPU, full b
 		}
 		return m
 	}
-	for _, s := range sensors {
-		bump(s.Celsius)
-	}
 	for _, g := range gpus {
-		if g.Celsius != nil {
-			if t.GPUCelsius == nil {
-				t.GPUCelsius = wire.F(*g.Celsius)
-			}
-			bump(*g.Celsius)
+		if g.Celsius != nil && t.GPUCelsius == nil {
+			t.GPUCelsius = wire.F(*g.Celsius)
 		}
-	}
-	if t.CPUCelsius != nil {
-		bump(*t.CPUCelsius)
 	}
 	t.StorageCelsius = maxOf("Storage")
 	t.BatteryCelsius = maxOf("Battery")
-	t.PeakCelsius = peak
-	if peak == nil && len(fans) == 0 {
+	t.PeakCelsius = winPeakCelsius(sensors, t.CPUCelsius, gpus)
+	if t.PeakCelsius == nil && len(fans) == 0 && len(sensors) == 0 {
 		return nil
 	}
 	t.State = "nominal" // Windows exposes no thermal pressure state

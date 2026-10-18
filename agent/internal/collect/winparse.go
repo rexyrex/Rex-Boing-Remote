@@ -396,6 +396,24 @@ func winBuildMemory(total, avail uint64, load uint32, pi *winPerfInfo, pageUsage
 	return m
 }
 
+// winYoungProcessCPU is the CPU percentage of a process created since the
+// previous scan, which has no baseline: all of its CPU time (100 ns units)
+// over its life so far, bounded by the scan window in seconds. Times are
+// FILETIMEs. ok is false for a process that existed at the previous scan.
+func winYoungProcessCPU(cpu, created, prevScan, now uint64, window float64) (percent float64, ok bool) {
+	if created <= prevScan {
+		return 0, false
+	}
+	alive := 0.0
+	if now > created {
+		alive = float64(now-created) / 1e7
+	}
+	// At least one scheduler tick, so a process a few microseconds old
+	// cannot divide its first tick by nearly nothing.
+	alive = min(max(alive, 0.0156), window)
+	return float64(cpu) / 1e7 / alive * 100, true
+}
+
 // winFiletimeToUnixMicros converts a FILETIME (100 ns since 1601) to
 // microseconds since the Unix epoch.
 func winFiletimeToUnixMicros(ft uint64) uint64 {
@@ -830,6 +848,33 @@ func winMergeNvidia(gpus []wire.GPU, nv []wire.GPU) []wire.GPU {
 }
 
 // ---------------------------------------------------------------- thermal
+
+// winPeakCelsius is the hottest CPU, GPU or SoC reading, the rule the Linux
+// collector follows: drives, voltage regulators and ACPI zones run hot or sit
+// at fixed values without saying how hard the machine works.
+func winPeakCelsius(sensors []wire.Sensor, cpu *float64, gpus []wire.GPU) *float64 {
+	var peak *float64
+	bump := func(v float64) {
+		if peak == nil || v > *peak {
+			peak = wire.F(v)
+		}
+	}
+	for _, s := range sensors {
+		switch s.Category {
+		case "CPU", "GPU", "SoC":
+			bump(s.Celsius)
+		}
+	}
+	for _, g := range gpus {
+		if g.Celsius != nil {
+			bump(*g.Celsius)
+		}
+	}
+	if cpu != nil {
+		bump(*cpu)
+	}
+	return peak
+}
 
 // winThermalZoneSensors converts `\Thermal Zone Information(*)\Temperature`
 // (Kelvin) into sensors keyed tz0, tz1, … in instance-name order. ACPI zones

@@ -62,6 +62,8 @@ func (s *winProcState) scan(gpuPerPID map[int32]float64, gpuAttribution, resync 
 
 	elapsed := now.Sub(s.lastScan).Seconds()
 	rates := !resync && !s.lastScan.IsZero() && elapsed > 0 && elapsed < MaxGap.Seconds()
+	prevFT := winFiletime(windows.NsecToFiletime(s.lastScan.UnixNano()))
+	nowFT := winFiletime(windows.NsecToFiletime(now.UnixNano()))
 	next := make(map[winProcKey]*winProcPrev, len(s.prev)+16)
 	var all []wire.ProcessRow
 	threads, denied := 0, 0
@@ -82,7 +84,7 @@ func (s *winProcState) scan(gpuPerPID map[int32]float64, gpuAttribution, resync 
 		if g, ok := gpuPerPID[int32(pid)]; ok {
 			row.GPU = g
 		}
-		if !s.fill(&row, pid, next, rates, elapsed) {
+		if !s.fill(&row, pid, next, rates, elapsed, prevFT, nowFT) {
 			denied++
 		}
 		all = append(all, row)
@@ -113,7 +115,8 @@ func (s *winProcState) scan(gpuPerPID map[int32]float64, gpuAttribution, resync 
 // fill adds what an open handle tells about one process. It returns false
 // when Windows refuses the handle (other users' or protected processes for
 // a non-elevated agent); the row then keeps name, pid and threads only.
-func (s *winProcState) fill(row *wire.ProcessRow, pid uint32, next map[winProcKey]*winProcPrev, rates bool, elapsed float64) bool {
+// prevFT and nowFT are the previous scan's time and this one's, as FILETIMEs.
+func (s *winProcState) fill(row *wire.ProcessRow, pid uint32, next map[winProcKey]*winProcPrev, rates bool, elapsed float64, prevFT, nowFT uint64) bool {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return false
@@ -130,6 +133,11 @@ func (s *winProcState) fill(row *wire.ProcessRow, pid uint32, next map[winProcKe
 	row.Start = winFiletimeToUnixMicros(key.created)
 	if rates && prev != nil && cur.cpu >= prev.cpu {
 		row.CPU = float64(cur.cpu-prev.cpu) / 1e7 / elapsed * 100
+	} else if rates && prev == nil {
+		// Created since the previous scan: no baseline, so not 0 % either.
+		if v, ok := winYoungProcessCPU(cur.cpu, key.created, prevFT, nowFT, elapsed); ok {
+			row.CPU = v
+		}
 	}
 	if ws, ok := winProcessWorkingSet(h); ok {
 		row.Memory = ws

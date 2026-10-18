@@ -423,3 +423,43 @@ func TestWinPdhParseItems(t *testing.T) {
 		t.Error("a count beyond the buffer must be rejected")
 	}
 }
+
+func TestWinPeakCelsius(t *testing.T) {
+	sensors := []wire.Sensor{
+		{Key: "cpu0", Celsius: 61, Category: "CPU"},
+		{Key: "ssd0", Celsius: 71, Category: "Storage"},
+		{Key: "mb0", Celsius: 84, Category: "Other"}, // a VRM
+		{Key: "tz0", Celsius: 27.8, Category: "Other"},
+	}
+	if p := winPeakCelsius(sensors, wire.F(64), nil); p == nil || *p != 64 {
+		t.Errorf("peak %v, want the CPU's 64, not the drive or the VRM", p)
+	}
+	if p := winPeakCelsius(sensors, nil, []wire.GPU{{Celsius: wire.F(70)}, {}}); p == nil || *p != 70 {
+		t.Errorf("peak with a GPU %v", p)
+	}
+	if p := winPeakCelsius(sensors[1:], nil, nil); p != nil {
+		t.Errorf("peak from drives and zones alone: %v", *p)
+	}
+}
+
+func TestWinYoungProcessCPU(t *testing.T) {
+	const s = 10_000_000 // one second in FILETIME units
+	base := uint64(133_000_000_000_000_000)
+	cases := []struct {
+		name                   string
+		cpu, created, prev, at uint64
+		window, want           float64
+		ok                     bool
+	}{
+		{"existed before", 5 * s, base, base + s, base + 2*s, 1, 0, false},
+		{"half a second old, quarter second of CPU", s / 4, base + 3*s/2, base + s, base + 2*s, 1, 50, true},
+		{"two threads busy", s, base + 3*s/2, base + s, base + 2*s, 1, 200, true},
+		{"created during the scan", s / 100, base + 2*s + 1, base + s, base + 2*s, 1, 1 / 0.0156, true},
+	}
+	for _, tc := range cases {
+		got, ok := winYoungProcessCPU(tc.cpu, tc.created, tc.prev, tc.at, tc.window)
+		if ok != tc.ok || math.Abs(got-tc.want) > 1e-9 {
+			t.Errorf("%s: %v %v, want %v %v", tc.name, got, ok, tc.want, tc.ok)
+		}
+	}
+}
