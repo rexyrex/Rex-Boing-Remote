@@ -402,16 +402,19 @@ enum Manage {
             if !fileManager.fileExists(atPath: sshDir) {
                 try fileManager.createDirectory(atPath: sshDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             }
-            let existing = (try? String(contentsOfFile: keyFile, encoding: .utf8)) ?? ""
+            // Through a symlink if it is one, keeping every other line as
+            // it is, and refusing rather than starting from an empty file
+            // when the one there can't be read.
+            let path = AuthorizedKeys.resolve(keyFile)
+            let existing = try AuthorizedKeys.read(path)
             let quotedPath = "'" + installedPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
             let line = "restrict,command=\"\(quotedPath.replacingOccurrences(of: "\"", with: "\\\"")) ssh\" \(parts[0]) \(parts[1]) \(commentPrefix)\(name)"
-            var lines = existing.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            if lines.last == "" { lines.removeLast() }
-            lines.removeAll { $0.contains(" \(parts[1])") || $0.hasPrefix("\(parts[0]) \(parts[1])") }
-            lines.append(line)
-            try writeAtomically(lines.joined(separator: "\n") + "\n", to: keyFile, mode: 0o600)
+            let updated = AuthorizedKeys.upsert(existing?.bytes ?? [], line: Array(line.utf8), blob: parts[1]).content
+            if updated != existing?.bytes {
+                try AuthorizedKeys.write(updated, to: path, mode: existing?.mode ?? 0o600)
+            }
             return ManageResult(ok: true, message: "Installed. This key can now only start the agent.",
-                                details: ["agentPath": installedPath, "keyFile": keyFile])
+                                details: ["agentPath": installedPath, "keyFile": path])
         } catch {
             return ManageResult(ok: false, error: "install-failed", message: error.localizedDescription)
         }
@@ -419,15 +422,17 @@ enum Manage {
 
     static func uninstall() -> ManageResult {
         var removed = 0
-        if let existing = try? String(contentsOfFile: keyFile, encoding: .utf8) {
-            var lines = existing.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            if lines.last == "" { lines.removeLast() }
-            let kept = lines.filter { line in
-                let ours = line.split(separator: " ").last.map { $0.hasPrefix(commentPrefix) } ?? false
-                if ours { removed += 1 }
-                return !ours
+        let path = AuthorizedKeys.resolve(keyFile)
+        do {
+            if let existing = try AuthorizedKeys.read(path) {
+                let edited = AuthorizedKeys.removeKeys(existing.bytes, commentPrefix: commentPrefix)
+                removed = edited.removed
+                if removed > 0 { try AuthorizedKeys.write(edited.content, to: path, mode: existing.mode) }
             }
-            try? writeAtomically(kept.joined(separator: "\n") + (kept.isEmpty ? "" : "\n"), to: keyFile, mode: 0o600)
+        } catch {
+            // The agent stays, so uninstall can be run again once the file
+            // can be read: without it, the key would be left behind.
+            return ManageResult(ok: false, error: "uninstall-failed", message: error.localizedDescription)
         }
         try? FileManager.default.removeItem(atPath: installDir)
         return ManageResult(ok: true, message: "Removed \(removed) key\(removed == 1 ? "" : "s") and the agent.")
@@ -455,6 +460,11 @@ enum Manage {
             try FileManager.default.createDirectory(atPath: installDir, withIntermediateDirectories: true)
             try data.write(to: URL(fileURLWithPath: temp))
             chmod(temp, 0o755)
+            // Before it runs even once: see CodeSignature.
+            if let team = CodeSignature.ownTeamID(), let problem = CodeSignature.problem(path: temp, teamID: team) {
+                try? FileManager.default.removeItem(atPath: temp)
+                return ManageResult(ok: false, error: "bad-signature", message: problem)
+            }
             let check = Process()
             check.executableURL = URL(fileURLWithPath: temp)
             check.arguments = ["version"]
@@ -547,18 +557,6 @@ enum Manage {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
         let cleaned = String(label.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" })
         return cleaned.isEmpty ? "mac" : String(cleaned.prefix(64))
-    }
-
-    static func writeAtomically(_ text: String, to path: String, mode: mode_t) throws {
-        let temp = path + ".rex-boing-remote.\(getpid())"
-        try text.write(toFile: temp, atomically: false, encoding: .utf8)
-        chmod(temp, mode)
-        let fd = open(temp, O_RDONLY)
-        if fd >= 0 { fsync(fd); close(fd) }
-        guard rename(temp, path) == 0 else {
-            try? FileManager.default.removeItem(atPath: temp)
-            throw NSError(domain: "write", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errno))])
-        }
     }
 }
 

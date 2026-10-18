@@ -32,7 +32,9 @@ meant to hold up to anyone reading the code.
   command means the key can only run the agent, and the agent only accepts
   `stream`, `version`, `doctor`, `upgrade` (with a SHA-256 the new binary must
   match), `uninstall`, `pair-code`, `install-service` and `uninstall-service`,
-  each in exactly that form.
+  each in exactly that form. `upgrade` replaces the agent itself, so it is
+  the one command that can put new code on the server; see below for what
+  that means if the key is stolen.
 - Runs as that user, never as root, and opens no network listener of any kind.
 - Is read-only. It does not signal, change or start anything on the server,
   with one exception you opt into per server: background history.
@@ -78,9 +80,25 @@ the service and deletes the history file.
 
 ## What a compromise would mean
 
-- **Someone with the app's private key** can start the agent on your servers
-  and read the same metrics the app does. They cannot get a shell. Remove a
-  Mac's access by deleting its `rex-boing-remote:` line from
+- **Someone with the app's private key** can do on your servers what the
+  app does: read the same metrics and process lists, run `doctor` and
+  `pair-code`, turn background history on or off, and `uninstall` the agent
+  (with every Mac's key for it). The key gives no shell and no forwarding.
+  What `upgrade` lets them do depends on the agent:
+  - **Linux and Windows** (the Go agent), and **a macOS agent built from
+    source**: `upgrade` installs whatever binary they send, as long as it
+    matches the SHA-256 they also send, and runs it as that user. So the
+    stolen key is, in the end, code execution as that user on every such
+    server (on Windows, an administrator's account if that is where the
+    agent was installed).
+  - **macOS, with the signed agent from a release**: `upgrade` installs only
+    a binary signed with the same Developer ID team as the agent already
+    there, so the key can't put a program of its own in its place. (A
+    build of your own is installed with your SSH access: Repair, or the
+    install command.)
+
+  Treat the key like an SSH key with a forced command, not like a read-only
+  token. Remove a Mac's access by deleting its `rex-boing-remote:` line from
   `authorized_keys`, or with `rex-boing-agent uninstall`.
 - **A compromised server** can send the app arbitrary data. The app treats
   every line as untrusted: lines over 1 MiB end the session, and nothing a

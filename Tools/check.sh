@@ -19,6 +19,8 @@ swiftc -swift-version 5 -parse-as-library -I "$P" -o .build/checks/connection-ch
     RexBoingRemote/App/Paths.swift Shared/History.swift \
     RexBoingRemote/App/AppKey.swift RexBoingRemote/App/Askpass.swift \
     RexBoingRemote/Demo/Demo.swift RexBoingRemote/Demo/Replay.swift \
+    MacAgent/AuthorizedKeys.swift MacAgent/CodeSignature.swift \
     "$P/RexBoingKit.o" \
-    -framework AppKit -framework IOKit -framework SystemConfiguration -framework QuartzCore -framework Network
+    -framework AppKit -framework IOKit -framework SystemConfiguration -framework QuartzCore -framework Network \
+    -framework Security
 FAKE_SSH="$PWD/Tools/fake-ssh.sh" .build/checks/connection-check

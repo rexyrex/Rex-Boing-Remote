@@ -7,7 +7,9 @@ import SystemConfiguration
 /// forced command, so the key can do exactly one thing: start the agent. That
 /// is what lets the app reconnect on its own after sleep, a reboot or a
 /// network change without asking 1Password, a hardware key or the user for
-/// anything — and what makes a stolen copy of it nearly worthless.
+/// anything. A stolen copy still runs the agent's commands, `upgrade`
+/// included, which on all but a signed macOS agent means any binary:
+/// SECURITY.md says what that allows.
 enum AppKey {
     enum Failure: LocalizedError {
         case generation(String)

@@ -148,6 +148,91 @@ struct ConnectionCheck {
               && SSH.isUsableDestination("alex@nas.local") && SSH.isUsableDestination("nas"),
               "a typed destination that would read as an option, or has spaces, is refused")
 
+        // MARK: The macOS agent's authorized_keys and upgrades
+
+        // Lines the agent doesn't own survive byte for byte, whatever their
+        // encoding or line endings.
+        let theirKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEBBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5f"
+        let latin1 = Array("# Ren".utf8) + [0xE9] + Array("'s keys\r\n".utf8)
+            + Array("from=\"10.0.0.0/8\" \(theirKey) ren".utf8) + [0xE9] + Array("@laptop\r\n".utf8)
+        let ourBlob = "AAAAC3NzaC1lZDI1NTE5AAAAIE91cktleU91cktleU91cktleU91cktleU91cktl"
+        let ourLine = Array("restrict,command=\"'/Users/ren/.local/share/rex-boing-remote/rex-boing-agent' ssh\" ssh-ed25519 \(ourBlob) rex-boing-remote:Mac".utf8)
+        let installed = AuthorizedKeys.upsert(latin1, line: ourLine, blob: ourBlob)
+        check(!installed.replaced && installed.content == latin1 + ourLine + [0x0D, 0x0A],
+              "install keeps another key with non-UTF-8 bytes, and the file's CRLF endings")
+        let again = AuthorizedKeys.upsert(installed.content, line: ourLine + Array(" ".utf8), blob: ourBlob)
+        check(again.replaced && again.content == latin1 + ourLine + Array(" \r\n".utf8), "installing again replaces the agent's line in place")
+        let uninstalled = AuthorizedKeys.removeKeys(installed.content, commentPrefix: "rex-boing-remote:")
+        check(uninstalled.removed == 1 && uninstalled.content == latin1, "uninstall removes only the agent's line")
+        let noEnding = Array(theirKey.utf8)
+        check(AuthorizedKeys.upsert(noEnding, line: ourLine, blob: ourBlob).content == noEnding + [0x0A] + ourLine,
+              "a file without a last line ending gets one before the new line, and none after")
+
+        // On disk: a symlinked file stays a symlink, keeps its mode, and one
+        // that can't be read is never treated as empty.
+        let keysDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("rbr-keys-\(getpid())")
+        try? FileManager.default.removeItem(at: keysDirectory)
+        try? FileManager.default.createDirectory(at: keysDirectory, withIntermediateDirectories: true)
+        let realKeys = keysDirectory.appendingPathComponent("dotfiles-authorized_keys").path
+        let linkedKeys = keysDirectory.appendingPathComponent("authorized_keys").path
+        FileManager.default.createFile(atPath: realKeys, contents: Data(latin1))
+        chmod(realKeys, 0o640)
+        try? FileManager.default.createSymbolicLink(atPath: linkedKeys, withDestinationPath: realKeys)
+        let editPath = AuthorizedKeys.resolve(linkedKeys)
+        if let existing = try? AuthorizedKeys.read(editPath) {
+            try? AuthorizedKeys.write(AuthorizedKeys.upsert(existing.bytes, line: ourLine, blob: ourBlob).content, to: editPath, mode: existing.mode)
+        }
+        var linkInfo = stat()
+        lstat(linkedKeys, &linkInfo)
+        var realInfo = stat()
+        stat(realKeys, &realInfo)
+        let written = (try? Data(contentsOf: URL(fileURLWithPath: realKeys))).map { [UInt8]($0) }
+        check(linkInfo.st_mode & S_IFMT == S_IFLNK && realInfo.st_mode & 0o777 == 0o640 && written == latin1 + ourLine + [0x0D, 0x0A],
+              "a symlinked authorized_keys stays a symlink, with its mode, and the file it points to is edited")
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: keysDirectory.path)) ?? []
+        check(leftovers.sorted() == ["authorized_keys", "dotfiles-authorized_keys"], "and no temporary file is left (\(leftovers))")
+        chmod(realKeys, 0o000)
+        let unreadable = Result { try AuthorizedKeys.read(realKeys) }
+        if getuid() != 0 {
+            if case .failure = unreadable { check(true, "an unreadable authorized_keys is an error, not an empty file") } else {
+                check(false, "an unreadable authorized_keys is an error, not an empty file")
+            }
+        }
+        if case .success(nil) = Result(catching: { try AuthorizedKeys.read(keysDirectory.appendingPathComponent("missing").path) }) {
+            check(true, "a missing authorized_keys is simply none yet")
+        } else {
+            check(false, "a missing authorized_keys is simply none yet")
+        }
+        chmod(realKeys, 0o600)
+        try? FileManager.default.removeItem(at: keysDirectory)
+
+        // An upgrade over the restricted key takes only a binary signed by
+        // the agent's own team. This check is ad-hoc signed, like an agent
+        // built from source, which has no team and keeps taking any binary.
+        let me = CommandLine.arguments[0]
+        check(CodeSignature.teamID(path: me) == nil && CodeSignature.ownTeamID() == nil,
+              "an ad-hoc build has no team, so its upgrades are unchanged")
+        check(CodeSignature.problem(path: me, teamID: "ABCDE12345") != nil,
+              "a signed agent refuses an ad-hoc-signed upgrade")
+        check(CodeSignature.problem(path: "/usr/bin/true", teamID: "ABCDE12345") != nil,
+              "and one signed by anyone else (\(CodeSignature.problem(path: "/usr/bin/true", teamID: "ABCDE12345") ?? "accepted"))")
+        check(CodeSignature.problem(path: me, teamID: "X\" or true or \"") != nil, "and a malformed team never becomes a requirement")
+        // A Developer ID program on this Mac, if there is one, passes for
+        // its own team: the requirement is the right one.
+        let applications = (try? FileManager.default.contentsOfDirectory(atPath: "/Applications")) ?? []
+        let signed = applications.lazy.filter { $0.hasSuffix(".app") }.compactMap { app -> (String, String)? in
+            let bundle = Bundle(path: "/Applications/" + app)
+            guard let executable = bundle?.executablePath, let team = CodeSignature.teamID(path: executable),
+                  !team.isEmpty else { return nil }
+            return (executable, team)
+        }.first { CodeSignature.problem(path: $0.0, teamID: $0.1) == nil }
+        if let (executable, team) = signed {
+            check(CodeSignature.problem(path: executable, teamID: String(team.reversed())) != nil,
+                  "a program signed by its team passes, and fails for another team (\((executable as NSString).lastPathComponent))")
+        } else {
+            print("skip  no Developer ID program in /Applications to check a matching team against")
+        }
+
         // A link that drops twice comes back on its own, with history kept.
         var (connection, states) = run("drop-then-recover", seconds: 20) { c, _ in
             c.state == .live && (c.snapshot?.cpu.total ?? 0) > 0 && c.history.cpu.count >= 6
