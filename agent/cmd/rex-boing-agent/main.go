@@ -223,7 +223,13 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if k == "" {
 		k = firstLine(stdin)
 	}
-	return printResult(stdout, manage.Install(manage.InstallOptions{Key: k, Label: *label}))
+	r := manage.Install(manage.InstallOptions{Key: k, Label: *label})
+	if r.OK && r.Details["agentCopied"] == "true" {
+		// Installing again (the installer, or Repair) replaced the binary
+		// a background agent may still be running.
+		restartBackground(&r, manage.InstallDir())
+	}
+	return printResult(stdout, r)
 }
 
 // firstLine returns the first non-empty line of r, reading at most 16 KiB.
@@ -269,20 +275,32 @@ func cmdUpgrade(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	r := manage.Upgrade(stdin, sha, size)
 	if r.OK {
-		// The background agent still runs the old binary: restart it on
-		// the new one. Its history is saved and reloaded on the way.
-		restarted, err := service.Restart(manage.InstallDir())
-		switch {
-		case err != nil:
-			r.Message += " The background agent could not be restarted: " + err.Error()
-		case restarted:
-			if r.Details == nil {
-				r.Details = map[string]string{}
-			}
-			r.Details["service"] = "restarted"
-		}
+		restartBackground(&r, manage.InstallDir())
 	}
 	return printResult(stdout, r)
+}
+
+// restartService is service.Restart; tests replace it.
+var restartService = service.Restart
+
+// restartBackground restarts the background agent, when one is installed,
+// so it runs the binary now in place; its history is saved and reloaded on
+// the way. It returns once the new serve answers, or after 8 seconds: the
+// app asks for history once, right after its next session's hello, and
+// would otherwise find the serve still starting and go without it for that
+// whole session.
+func restartBackground(r *wire.Result, dir string) {
+	restarted, err := restartService(dir)
+	switch {
+	case err != nil:
+		r.Message += " The background agent could not be restarted: " + err.Error()
+	case restarted:
+		if r.Details == nil {
+			r.Details = map[string]string{}
+		}
+		r.Details["service"] = "restarted"
+		serve.WaitRunning(dir, 8*time.Second)
+	}
 }
 
 // cmdUninstall removes the background service first, while the agent that
@@ -307,7 +325,14 @@ func cmdServe(args []string, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		return 2
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signals := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	// A serve run by hand in a terminal that closes gets SIGHUP: save the
+	// history and stop, as for SIGTERM. Under nohup, which ignores it, it
+	// stays ignored (handling it would undo nohup).
+	if !signal.Ignored(syscall.SIGHUP) {
+		signals = append(signals, syscall.SIGHUP)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	defer stop()
 	c := collect.New()
 	defer c.Close()

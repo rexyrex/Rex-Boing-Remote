@@ -23,7 +23,8 @@ func TestSystemdQuote(t *testing.T) {
 func TestUnitText(t *testing.T) {
 	unit := unitText("/home/alex/.local/share/rex-boing-remote/rex-boing-agent")
 	for _, want := range []string{
-		"\n[Service]\n",
+		"[Unit]\nDescription=",
+		"\nConditionPathIsExecutable=/home/alex/.local/share/rex-boing-remote/rex-boing-agent\n\n[Service]\n",
 		"\nExecStart=\"/home/alex/.local/share/rex-boing-remote/rex-boing-agent\" serve\n",
 		"\nRestart=on-failure\n",
 		"\n[Install]\nWantedBy=default.target\n",
@@ -36,6 +37,11 @@ func TestUnitText(t *testing.T) {
 		if strings.HasPrefix(line, "ExecStart=") && strings.Count(line, "serve") != 1 {
 			t.Errorf("ExecStart runs more than serve: %s", line)
 		}
+	}
+	// A condition takes its path as it is: only specifiers are escaped.
+	odd := unitText(`/home/100% "x"/$HOME/agent`)
+	if !strings.Contains(odd, "\nConditionPathIsExecutable=/home/100%% \"x\"/$HOME/agent\n") {
+		t.Errorf("condition path not escaped for systemd:\n%s", odd)
 	}
 }
 

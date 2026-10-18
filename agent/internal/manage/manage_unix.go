@@ -292,33 +292,33 @@ func unixAuthorizedKeys(create bool) (string, error) {
 }
 
 // unixCopyExecutable puts the running executable at dest unless it already
-// runs from there.
-func unixCopyExecutable(dest string) error {
+// runs from there, and reports whether it did.
+func unixCopyExecutable(dest string) (bool, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if real, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = real
 	}
 	if a, err := os.Stat(exe); err == nil {
 		if b, err := os.Stat(dest); err == nil && os.SameFile(a, b) {
-			return nil
+			return false, nil
 		}
 	}
 	src, err := os.Open(exe)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer src.Close()
 	data, err := io.ReadAll(io.LimitReader(src, unixMaxUpgrade+1))
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(data) > unixMaxUpgrade {
-		return errors.New("the running executable is unexpectedly large")
+		return false, errors.New("the running executable is unexpectedly large")
 	}
-	return unixWriteAtomic(dest, data, 0o755)
+	return true, unixWriteAtomic(dest, data, 0o755)
 }
 
 func install(o InstallOptions) wire.Result {
@@ -343,7 +343,8 @@ func install(o InstallOptions) wire.Result {
 		return unixFail("install-failed", "Cannot create %s: %v", dir, err)
 	}
 	agentPath := filepath.Join(dir, executableName())
-	if err := unixCopyExecutable(agentPath); err != nil {
+	copied, err := unixCopyExecutable(agentPath)
+	if err != nil {
 		return unixFail("install-failed", "Cannot copy the agent to %s: %v", agentPath, err)
 	}
 
@@ -371,7 +372,11 @@ func install(o InstallOptions) wire.Result {
 	if replaced {
 		msg = "Updated. The key " + KeyCommentPrefix + label + " can now run the agent, and nothing else."
 	}
-	return wire.Result{OK: true, Message: msg, Details: map[string]string{"agentPath": agentPath, "keyFile": keyFile}}
+	details := map[string]string{"agentPath": agentPath, "keyFile": keyFile}
+	if copied {
+		details["agentCopied"] = "true"
+	}
+	return wire.Result{OK: true, Message: msg, Details: details}
 }
 
 func uninstall() wire.Result {

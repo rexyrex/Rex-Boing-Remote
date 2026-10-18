@@ -31,16 +31,23 @@ func systemdQuote(arg string) string {
 	return `"` + r.Replace(arg) + `"`
 }
 
+// systemdSpecifiers escapes a value systemd takes as it is, such as a
+// condition's path: only % is special there, where it starts a specifier.
+func systemdSpecifiers(s string) string { return strings.ReplaceAll(s, "%", "%%") }
+
 // unitText is the systemd user unit that runs serve.
 //
 // Restart only on failure: a serve that finds another one running exits
-// cleanly and stays stopped. Nice and the idle I/O class keep it out of the
-// way of whatever the machine is for.
+// cleanly and stays stopped. The condition keeps a unit whose agent was
+// deleted by hand from failing every 30 seconds for good: it is skipped
+// instead. Nice and the idle I/O class keep it out of the way of whatever
+// the machine is for.
 func unitText(agentPath string) string {
 	return "# Written by rex-boing-agent install-service; removed by uninstall-service.\n" +
 		"[Unit]\n" +
 		"Description=" + description + "\n" +
 		"Documentation=https://github.com/rexyrex/Rex-Boing-Remote\n" +
+		"ConditionPathIsExecutable=" + systemdSpecifiers(agentPath) + "\n" +
 		"\n" +
 		"[Service]\n" +
 		"Type=simple\n" +

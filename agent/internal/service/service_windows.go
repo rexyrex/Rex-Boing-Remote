@@ -86,7 +86,7 @@ func Install(agentPath, dir string) wire.Result {
 	}
 	schtasks("/Run", "/TN", TaskName) // fails when no one is signed in; the trigger starts it later
 	details := map[string]string{"manager": "task", "task": TaskName}
-	if st, ok := waitRunning(dir, 8*time.Second); ok {
+	if st, ok := serve.WaitRunning(dir, 8*time.Second); ok {
 		details["running"] = "yes"
 		return wire.Result{OK: true, Details: details, Message: fmt.Sprintf(
 			"Keeping history: the agent samples every %g s in the background and keeps 48 hours, as the scheduled task %q. "+
@@ -96,19 +96,6 @@ func Install(agentPath, dir string) wire.Result {
 	return wire.Result{OK: true, Details: details, Message: fmt.Sprintf(
 		"Installed as the scheduled task %q, which Windows starts when %s signs in. No one is signed in to this PC "+
 			"right now, so it starts at the next sign-in (at the console or over Remote Desktop).", strings.TrimPrefix(TaskName, `\`), userID)}
-}
-
-func waitRunning(dir string, timeout time.Duration) (serve.Status, bool) {
-	deadline := time.Now().Add(timeout)
-	for {
-		if st, err := serve.Query(dir, time.Second); err == nil {
-			return st, true
-		}
-		if time.Now().After(deadline) {
-			return serve.Status{}, false
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 }
 
 // Uninstall stops the background agent, deletes the task, and deletes the

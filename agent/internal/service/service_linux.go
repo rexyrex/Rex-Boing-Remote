@@ -127,7 +127,7 @@ func Install(agentPath, dir string) wire.Result {
 			return fail("install-failed", "systemctl --user %s failed: %s", strings.Join(args, " "), firstLine(out, err))
 		}
 	}
-	st, running := waitRunning(dir, 8*time.Second)
+	st, running := serve.WaitRunning(dir, 8*time.Second)
 	if !running {
 		out, _ := systemctl("status", "--no-pager", "--lines=5", unitName)
 		return fail("not-running", "The service is installed but did not start. See: journalctl --user -u %s\n%s", unitName, out)
@@ -155,20 +155,6 @@ func Install(agentPath, dir string) wire.Result {
 			"session ends, which is when history matters. Turn it on once, as an administrator: %s", name, fix)
 	}
 	return wire.Result{OK: true, Message: msg, Details: details}
-}
-
-// waitRunning waits for the new serve to answer.
-func waitRunning(dir string, timeout time.Duration) (serve.Status, bool) {
-	deadline := time.Now().Add(timeout)
-	for {
-		if st, err := serve.Query(dir, time.Second); err == nil {
-			return st, true
-		}
-		if time.Now().After(deadline) {
-			return serve.Status{}, false
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 }
 
 // Uninstall stops and removes the unit, and deletes the history it kept.

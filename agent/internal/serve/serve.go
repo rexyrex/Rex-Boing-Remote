@@ -345,6 +345,21 @@ func Stop(dir string, timeout time.Duration) error {
 // it leaves the endpoint alone.
 func RemoveEndpoint(dir string) error { return removeEndpoint(dir) }
 
+// WaitRunning waits until a serve answers, up to timeout, and returns its
+// status.
+func WaitRunning(dir string, timeout time.Duration) (Status, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if st, err := Query(dir, time.Second); err == nil {
+			return st, true
+		}
+		if time.Now().After(deadline) {
+			return Status{}, false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // WaitStopped waits until no serve answers, up to timeout.
 func WaitStopped(dir string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)

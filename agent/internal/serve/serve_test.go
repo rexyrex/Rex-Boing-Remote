@@ -209,4 +209,8 @@ func TestNoServe(t *testing.T) {
 	if _, err := Query(dir, 300*time.Millisecond); err == nil {
 		t.Errorf("status without a serve")
 	}
+	began := time.Now()
+	if _, ok := WaitRunning(dir, 300*time.Millisecond); ok || time.Since(began) > 3*time.Second {
+		t.Errorf("WaitRunning without a serve: %v after %v", ok, time.Since(began))
+	}
 }

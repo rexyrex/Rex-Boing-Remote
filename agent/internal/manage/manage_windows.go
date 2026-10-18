@@ -364,6 +364,9 @@ func install(o InstallOptions) wire.Result {
 	if created {
 		details["keyFileCreated"] = "true"
 	}
+	if copied {
+		details["agentCopied"] = "true"
+	}
 	return wire.Result{OK: true, Message: msg, Details: details}
 }
 

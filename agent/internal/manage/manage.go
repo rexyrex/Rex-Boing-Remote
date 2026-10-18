@@ -25,7 +25,8 @@ type InstallOptions struct {
 // Install copies the running executable to the install directory if it is
 // not already there, and adds Key to the user's authorized keys, restricted
 // to running this agent. Idempotent: an existing line for the same key is
-// replaced, not duplicated.
+// replaced, not duplicated. The result's details say "agentCopied" when the
+// installed binary was replaced.
 func Install(o InstallOptions) wire.Result { return install(o) }
 
 // Uninstall removes every key line this agent installed and the install
