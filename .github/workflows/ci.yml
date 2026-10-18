@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# CI only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   agent:
     name: Agent on ${{ matrix.os }}
@@ -40,6 +44,16 @@ jobs:
           # Stdin stays open while samples are taken; EOF ends the stream.
           { echo '{"want":"full"}'; sleep 8; } | ./rex-boing-agent* stream --count 4 --interval 1 > stream.jsonl
           $([ "$RUNNER_OS" = Windows ] && echo python || echo python3) ../.github/scripts/check-stream.py stream.jsonl
+      # Windows PowerShell 5.1, the oldest the installer supports: what it
+      # parses, PowerShell 7 parses too.
+      - name: Installer syntax (PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        working-directory: .
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path install.ps1).Path, [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
 
   app:
     name: App and macOS agent

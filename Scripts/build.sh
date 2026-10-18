@@ -32,23 +32,46 @@ xcodebuild -project RexBoingRemote.xcodeproj -scheme RexBoingRemote -configurati
     -derivedDataPath .build build > .build-log.txt 2>&1
 STATUS=$?
 set -e
-grep -E "error:|warning: .*(RexBoingRemote|MacAgent)|BUILD (SUCCEEDED|FAILED)" .build-log.txt | grep -v "^\s*$" | sort -u | head -60
+# A filter, not a check: no match, or head closing the pipe early, is fine.
+grep -E "error:|warning: .*(RexBoingRemote|MacAgent)|BUILD (SUCCEEDED|FAILED)" .build-log.txt | grep -v "^\s*$" | sort -u | head -60 || true
 [ $STATUS -eq 0 ] || exit $STATUS
 
 APP=".build/Build/Products/Release/Rex Boing Remote.app"
 rm -rf dist && mkdir -p dist && cp -R "$APP" dist/
 echo "==> Staged dist/Rex Boing Remote.app"
 
+# The processes running from the installed app, and only those: a copy
+# run from dist/ or anywhere else (a demo beside the real one) is not it.
+installed_pids() {
+    ps -axo pid=,comm= | awk -v dir="$TARGET/Contents/MacOS/" '
+        { pid = $1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); if (index($0, dir) == 1) print pid }'
+}
+
 if [ "$INSTALL" -eq 1 ]; then
     TARGET="/Applications/Rex Boing Remote.app"
-    PID=$(pgrep -x "Rex Boing Remote" || true)
-    if [ -n "$PID" ]; then
-        echo "==> Quitting the running copy (pid $PID)"
-        kill "$PID"
-        for _ in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.25; done
+    STAGED="/Applications/.Rex Boing Remote.app.new"
+    OLD="/Applications/.Rex Boing Remote.app.old"
+    # Copied beside the installed app first: a copy that fails leaves the
+    # installed app as it was.
+    rm -rf "$STAGED" "$OLD"
+    ditto "dist/Rex Boing Remote.app" "$STAGED"
+    PIDS=$(installed_pids)
+    if [ -n "$PIDS" ]; then
+        echo "==> Quitting the running copy (pid $(echo $PIDS))"
+        for pid in $PIDS; do kill "$pid" 2>/dev/null || true; done
+        for _ in $(seq 1 20); do
+            [ -n "$(installed_pids)" ] || break
+            sleep 0.25
+        done
+        if [ -n "$(installed_pids)" ]; then
+            rm -rf "$STAGED"
+            echo "Rex Boing Remote (pid $(echo $(installed_pids))) did not quit within 5 s; $TARGET was left as it was." >&2
+            exit 1
+        fi
     fi
-    rm -rf "$TARGET"
-    ditto "dist/Rex Boing Remote.app" "$TARGET"
+    if [ -e "$TARGET" ]; then mv "$TARGET" "$OLD"; fi
+    mv "$STAGED" "$TARGET"
+    rm -rf "$OLD"
     open "$TARGET"
     echo "Done. Rex Boing Remote is running from $TARGET."
 fi
