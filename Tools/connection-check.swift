@@ -671,7 +671,14 @@ struct ConnectionCheck {
                 ranOn.add(sample(i))
                 restarted.add(sample(i))
             }
-            check(restarted.encoded() == ranOn.encoded() && restarted.medium.points.count == ranOn.medium.points.count,
+            // Compared as JSON values, as the golden check does: JSONEncoder
+            // promises no key order, and two encodings of equal rings can
+            // list their keys differently.
+            func json(_ rings: HistoryRings) -> NSDictionary? {
+                try? JSONSerialization.jsonObject(with: rings.encoded()) as? NSDictionary
+            }
+            let sameRings = json(restarted).map { $0 == json(ranOn) } ?? false
+            check(sameRings && restarted.medium.points.count == ranOn.medium.points.count,
                   "a restart mid-window keeps the windows it spans (\(restarted.medium.points.count) of \(ranOn.medium.points.count) half-minutes, "
                   + "\(restarted.coarse.points.count) of \(ranOn.coarse.points.count) five-minute points)")
 
