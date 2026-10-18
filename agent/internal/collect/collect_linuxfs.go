@@ -157,6 +157,22 @@ func linuxDirNames(path string) []string {
 	return names
 }
 
+// linuxSubdirs lists the directories in a directory (cgroups, beside the
+// cgroup's own files). Missing directories are empty.
+func linuxSubdirs(path string) []string {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
 // linuxAtou parses an unsigned decimal number from b without allocating.
 func linuxAtou(b []byte) (uint64, bool) {
 	if len(b) == 0 {

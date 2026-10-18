@@ -228,23 +228,33 @@ func linuxParseUpdates(text string) (updates, security *int) {
 
 // countContainers counts running containers from their cgroups: Docker and
 // Podman scopes under the systemd driver, Docker's cgroupfs driver on cgroup
-// v2 and v1, systemd-nspawn/libvirt machines and LXC payloads. ok is false
-// when no container runtime is installed, so hosts without one report no
-// count rather than zero.
+// v2 and v1, systemd-nspawn/libvirt machines and LXC, LXD, Incus and Proxmox
+// containers. ok is false when no container runtime is installed, so hosts
+// without one report no count rather than zero.
 func (c *linuxCollector) countContainers() (n int, ok bool) {
 	cg := c.path("sys/fs/cgroup")
-	for _, slice := range []string{"system.slice", "machine.slice"} {
-		for _, name := range linuxDirNames(cg + "/" + slice) {
-			if !strings.HasSuffix(name, ".scope") {
-				continue
+	// The systemd driver's scopes sit at the top of cgroup v2, and in the
+	// name=systemd hierarchy on v1 and hybrid hosts.
+	for _, base := range []string{cg, cg + "/systemd"} {
+		found := false
+		for _, slice := range []string{"system.slice", "machine.slice"} {
+			names := linuxDirNames(base + "/" + slice)
+			found = found || names != nil
+			for _, name := range names {
+				if !strings.HasSuffix(name, ".scope") {
+					continue
+				}
+				switch {
+				case strings.HasPrefix(name, "docker-"),
+					strings.HasPrefix(name, "libpod-") && !strings.HasPrefix(name, "libpod-conmon-"),
+					strings.HasPrefix(name, "crio-") && !strings.HasPrefix(name, "crio-conmon-"),
+					slice == "machine.slice" && strings.HasPrefix(name, "machine-"):
+					n++
+				}
 			}
-			switch {
-			case strings.HasPrefix(name, "docker-"),
-				strings.HasPrefix(name, "libpod-") && !strings.HasPrefix(name, "libpod-conmon-"),
-				strings.HasPrefix(name, "crio-") && !strings.HasPrefix(name, "crio-conmon-"),
-				slice == "machine.slice" && strings.HasPrefix(name, "machine-"):
-				n++
-			}
+		}
+		if found {
+			break
 		}
 	}
 	for _, dir := range []string{"docker", "cpu/docker", "cpu,cpuacct/docker", "memory/docker", "pids/docker"} {
@@ -259,9 +269,21 @@ func (c *linuxCollector) countContainers() (n int, ok bool) {
 		}
 		break
 	}
-	for _, name := range linuxDirNames(cg) {
-		if strings.HasPrefix(name, "lxc.payload.") {
-			n++
+	// LXC 4 and later (and LXD, Incus) name a container's cgroup
+	// lxc.payload.<name>; Proxmox uses lxc/<vmid>, as older LXC did with
+	// lxc/<name>. They sit at the top of cgroup v2 and under every
+	// controller of v1, where one controller is counted. lxc.monitor.* and
+	// lxc.pivot hold LXC's own processes, not containers.
+	for _, base := range []string{cg, cg + "/memory", cg + "/pids", cg + "/cpu,cpuacct", cg + "/cpu"} {
+		found := len(linuxSubdirs(base + "/lxc"))
+		for _, name := range linuxDirNames(base) {
+			if strings.HasPrefix(name, "lxc.payload.") {
+				found++
+			}
+		}
+		if found > 0 {
+			n += found
+			break
 		}
 	}
 	if n > 0 {

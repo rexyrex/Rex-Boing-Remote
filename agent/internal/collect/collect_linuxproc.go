@@ -22,9 +22,9 @@ type linuxProcKey struct {
 }
 
 // linuxProcInfo is what is kept per process between scans. Names, owner and
-// command line are read once per process (again only after an exec changes
-// its comm); each scan then costs one stat read, plus io for our own
-// processes.
+// command line are read once per process (again after an exec changes its
+// comm, and once more for one first seen in its first two seconds); each
+// scan then costs one stat read, plus io for our own processes.
 type linuxProcInfo struct {
 	ticks       uint64
 	read, write uint64
@@ -35,6 +35,7 @@ type linuxProcInfo struct {
 	user        string
 	path        string
 	cmd         string
+	recheck     bool // described in its first moments: describe once more
 }
 
 // linuxProcState keeps the per-process baselines and the last table.
@@ -43,6 +44,7 @@ type linuxProcState struct {
 	last     *wire.Processes
 	lastScan time.Time
 	lastDur  time.Duration
+	uptime   float64 // seconds since boot at lastScan, 0 when unknown
 	zombies  *int
 	users    map[string]string
 	passwd   map[string]string
@@ -97,6 +99,12 @@ func linuxStatFields(data []byte) (comm string, state byte, ticks uint64, thread
 // every tick.
 const linuxProcMinGap = 900 * time.Millisecond
 
+// linuxProcSettle is how old a process must be before its description is
+// trusted: a forked worker rewrites its title (nginx, gunicorn, postgres)
+// only after it starts, and one described earlier shows its parent's
+// command line.
+const linuxProcSettle = 2 * time.Second
+
 // sampleProcesses scans /proc at most every linuxProcMinGap (and never more
 // than a tenth of the time, on machines where a scan is slow) and repeats
 // the last table in between.
@@ -122,6 +130,15 @@ func (c *linuxCollector) sampleProcesses(now time.Time) *wire.Processes {
 	}
 	names, _ := dir.Readdirnames(-1)
 	dir.Close()
+	// Seconds since boot, the clock of each process's start time: it tells
+	// which processes were born since the previous scan, and how young each is.
+	uptime := 0.0
+	if s, err := linuxReadValue(c.path("proc/uptime")); err == nil {
+		if f := strings.Fields(s); len(f) > 0 {
+			uptime, _ = strconv.ParseFloat(f[0], 64)
+		}
+	}
+	prevUptime := ps.uptime
 
 	next := make(map[linuxProcKey]*linuxProcInfo, len(names))
 	all := make([]wire.ProcessRow, 0, len(names))
@@ -158,13 +175,22 @@ func (c *linuxCollector) sampleProcesses(now time.Time) *wire.Processes {
 		if old != nil {
 			prevTicks, prevRead, prevWrite, prevIO = old.ticks, old.read, old.write, old.ioOK
 		}
-		if info == nil || info.comm != comm {
-			// New, or it exec'd something else: describe it again. The
-			// counters carry over, it is still the same process.
+		// Seconds since it started; a process born while the scan runs
+		// can come out a little negative.
+		age, knownAge := 0.0, uptime > 0
+		if knownAge {
+			age = uptime - float64(start)/c.clkTck
+		}
+		settled := info != nil && info.recheck && knownAge && age >= linuxProcSettle.Seconds()
+		if info == nil || info.comm != comm || settled {
+			// New, or it exec'd something else, or it was described before
+			// it set its title: describe it again. The counters carry over,
+			// it is still the same process.
 			fresh := c.describeProcess(base, comm)
 			if old != nil {
 				fresh.read, fresh.write, fresh.ioOK, fresh.ioDenied = old.read, old.write, old.ioOK, old.ioDenied
 			}
+			fresh.recheck = knownAge && age < linuxProcSettle.Seconds()
 			info = fresh
 		}
 		info.ticks = ticks
@@ -181,8 +207,15 @@ func (c *linuxCollector) sampleProcesses(now time.Time) *wire.Processes {
 		if btime > 0 {
 			row.Start = uint64(btime)*1e6 + uint64(float64(start)/c.clkTck*1e6)
 		}
-		if valid && old != nil && ticks >= prevTicks {
+		switch {
+		case valid && old != nil && ticks >= prevTicks:
 			row.CPU = float64(int(float64(ticks-prevTicks)/c.clkTck/elapsed*1000+0.5)) / 10
+		case valid && old == nil && knownAge && prevUptime > 0 && float64(start)/c.clkTck > prevUptime:
+			// Born since the previous scan, so it has no baseline: all of
+			// its CPU time falls in this window, over the time it has been
+			// alive. Without this a build's compilers all rank at 0 %.
+			alive := min(max(age, 1/c.clkTck), elapsed)
+			row.CPU = float64(int(float64(ticks)/c.clkTck/alive*1000+0.5)) / 10
 		}
 		if !info.ioDenied {
 			r, w, err := linuxReadProcIO(filepath.Join(base, "io"), &ps.buf)
@@ -215,7 +248,7 @@ func (c *linuxCollector) sampleProcesses(now time.Time) *wire.Processes {
 		Rank:           rank,
 	}
 	ps.zombies = &zombies
-	ps.lastScan, ps.lastDur, ps.last = now, time.Since(began), out
+	ps.lastScan, ps.lastDur, ps.last, ps.uptime = now, time.Since(began), out, uptime
 	c.cpu.procCount, c.cpu.procCountAt = len(all), now
 	return out
 }

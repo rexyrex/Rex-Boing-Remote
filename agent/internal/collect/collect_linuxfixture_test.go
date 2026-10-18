@@ -1153,6 +1153,24 @@ func TestLinuxDisk(t *testing.T) {
 	if dev := p.disk.devs["mmcblk0boot0"]; dev == nil || dev.whole || !p.disk.devs["mmcblk0"].whole {
 		t.Errorf("mmc boot partitions must not count as disks")
 	}
+
+	// A disk mounted at /var/lib/docker (or kubelet's) is the user's, often
+	// the one that fills up; what the runtimes mount beneath stays hidden.
+	vols = nil
+	for _, m := range linuxVolumeMounts([]linuxMount{
+		{majmin: "259:2", root: "/", point: "/", fs: "ext4", source: "/dev/nvme0n1p2"},
+		{majmin: "259:5", root: "/", point: "/var/lib/docker", fs: "xfs", source: "/dev/nvme1n1p1"},
+		{majmin: "8:17", root: "/", point: "/var/lib/docker/volumes/pg/_data", fs: "ext4", source: "/dev/sdb1"},
+		{majmin: "8:33", root: "/", point: "/var/lib/kubelet", fs: "ext4", source: "/dev/sdc1"},
+		{majmin: "8:49", root: "/", point: "/var/lib/kubelet/pods/x/volumes/y", fs: "ext4", source: "/dev/sdd1"},
+		{majmin: "8:65", root: "/", point: "/snap", fs: "ext4", source: "/dev/sde1"},
+		{majmin: "8:81", root: "/", point: "/snap/data/1", fs: "ext4", source: "/dev/sdf1"},
+	}) {
+		vols = append(vols, m.point)
+	}
+	if got := strings.Join(vols, " "); got != "/ /var/lib/docker /var/lib/kubelet /snap" {
+		t.Errorf("runtime mounts %q", got)
+	}
 }
 
 func linuxTDiskstatsFile(rows ...string) string {
@@ -1302,6 +1320,24 @@ func TestLinuxProcesses(t *testing.T) {
 		t.Errorf("process table rescanned within %v", linuxProcMinGap)
 	}
 
+	// A process born since the last scan has no baseline: its CPU is all
+	// its time over its life so far (80 ticks in its one second), not 0.
+	linuxTPut(t, root, "proc/uptime", "837850.00 0\n")
+	linuxTPut(t, root, "proc/1600/stat", "1600 (cc1) R 1 1600 1600 0 -1 0 0 0 0 0 60 20 0 0 20 0 1 0 83784900 1000 2000 0\n")
+	linuxTPut(t, root, "proc/1600/status", "Name:\tcc1\nUid:\t1000\t1000\t1000\t1000\n")
+	linuxTPut(t, root, "proc/1600/cmdline", "cc1\x00main.c\x00")
+	linuxTPause(c, 2*time.Second)
+	p = c.Sample(wire.DetailFull).Processes
+	rows = map[int32]wire.ProcessRow{}
+	for _, r := range p.Rows {
+		rows[r.PID] = r
+	}
+	linuxTNear(t, "new process cpu", rows[1600].CPU, 80, 0.1)
+	if p.Rank["cpu"][0] != 1600 {
+		t.Errorf("the new process does not rank: %v", p.Rank["cpu"])
+	}
+	os.RemoveAll(filepath.Join(root, "proc/1600"))
+
 	// A reused pid is a new process; an exited one is forgotten.
 	linuxTPut(t, root, "proc/1234/stat", strings.Replace(linuxTReadFile(t, root, "proc/1234/stat"), " 50000 ", " 90000 ", 1))
 	os.RemoveAll(filepath.Join(root, "proc/1300"))
@@ -1319,6 +1355,169 @@ func TestLinuxProcesses(t *testing.T) {
 	}
 	if p.Count != 5 {
 		t.Errorf("count %d", p.Count)
+	}
+}
+
+func TestLinuxProcessSettles(t *testing.T) {
+	// A worker described in its first moments still shows its parent's
+	// command line; once it has settled it is described once more.
+	c, root := linuxTFixture(t, "linux-intel-hybrid")
+	uptime := 837844.58
+	linuxTPut(t, root, "proc/1700/stat", fmt.Sprintf("1700 (gunicorn) S 1 1700 1700 0 -1 0 0 0 0 0 1 1 0 0 20 0 1 0 %d 1000 2000 0\n", int((uptime-0.5)*100)))
+	linuxTPut(t, root, "proc/1700/status", "Name:\tgunicorn\nUid:\t1000\t1000\t1000\t1000\n")
+	linuxTPut(t, root, "proc/1700/cmdline", "/usr/bin/python3\x00/usr/bin/gunicorn\x00app:main\x00")
+	cmd := func() string {
+		linuxTPut(t, root, "proc/uptime", fmt.Sprintf("%.2f 0\n", uptime))
+		for _, r := range c.Sample(wire.DetailFull).Processes.Rows {
+			if r.PID == 1700 {
+				return r.Cmd
+			}
+		}
+		t.Fatal("no row for pid 1700")
+		return ""
+	}
+	if got := cmd(); got != "/usr/bin/python3 /usr/bin/gunicorn app:main" {
+		t.Fatalf("young worker cmd %q", got)
+	}
+	linuxTPut(t, root, "proc/1700/cmdline", "gunicorn: worker [app]")
+	for _, step := range []struct {
+		age  float64
+		want string
+	}{
+		{1.5, "/usr/bin/python3 /usr/bin/gunicorn app:main"}, // not settled yet
+		{2.5, "gunicorn: worker [app]"},
+		{3.5, "gunicorn: worker [app]"},
+	} {
+		if step.age == 3.5 {
+			linuxTPut(t, root, "proc/1700/cmdline", "gunicorn: renamed again")
+		}
+		uptime = 837844.58 - 0.5 + step.age
+		linuxTPause(c, time.Second)
+		if got := cmd(); got != step.want {
+			t.Errorf("at %.1f s: cmd %q, want %q", step.age, got, step.want)
+		}
+	}
+	// Processes that were old when first seen are described once.
+	for k, info := range c.procs.prev {
+		if k.pid != 1700 && info.recheck {
+			t.Errorf("pid %d marked for another description", k.pid)
+		}
+	}
+}
+
+func TestLinuxProcIODenied(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs file permissions that apply")
+	}
+	c, root := linuxTFixture(t, "linux-intel-hybrid")
+	io := filepath.Join(root, "proc/1234/io")
+	if err := os.Chmod(io, 0); err != nil {
+		t.Fatal(err)
+	}
+	c.Sample(wire.DetailFull)
+	if err := os.Chmod(io, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linuxTPut(t, root, "proc/1234/io", "read_bytes: 9000000\nwrite_bytes: 9000000\n")
+	linuxTPause(c, 2*time.Second)
+	p := c.Sample(wire.DetailFull).Processes
+	for k, info := range c.procs.prev {
+		if k.pid == 1234 && (!info.ioDenied || info.ioOK) {
+			t.Errorf("another user's io was asked again: %+v", info)
+		}
+	}
+	found := false
+	for _, r := range p.Rows {
+		if r.PID == 1234 {
+			found = true
+			if r.DiskRead != 0 || r.Name != "Web Content" {
+				t.Errorf("denied io row %+v", r)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("a process whose io is denied lost its row")
+	}
+}
+
+func TestLinuxReadProcLong(t *testing.T) {
+	dir := t.TempDir()
+	var buf []byte
+	for _, n := range []int{100, 4095, 4096, 4097, 20000} {
+		want := strings.Repeat("x", n)
+		p := filepath.Join(dir, fmt.Sprint(n))
+		if err := os.WriteFile(p, []byte(want), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := linuxReadProc(p, &buf)
+		if err != nil || string(got) != want {
+			t.Errorf("%d bytes: read %d, %v", n, len(got), err)
+		}
+	}
+}
+
+func TestLinuxMountinfoOptionalFields(t *testing.T) {
+	data := "29 1 259:2 / / rw,relatime - ext4 /dev/nvme0n1p2 rw\n" + // none
+		"36 29 98:0 / /mnt/one rw,noatime master:1 - ext3 /dev/sdb1 rw\n" +
+		"37 29 8:17 /data /mnt/two rw shared:2 master:1 - xfs /dev/sdc1 rw\n" +
+		"38 29 8:18 / /mnt/broken rw shared:3 xfs /dev/sdd1 rw\n" // no separator: skipped
+	got := linuxParseMountinfo([]byte(data))
+	want := []linuxMount{
+		{majmin: "259:2", root: "/", point: "/", fs: "ext4", source: "/dev/nvme0n1p2"},
+		{majmin: "98:0", root: "/", point: "/mnt/one", fs: "ext3", source: "/dev/sdb1"},
+		{majmin: "8:17", root: "/data", point: "/mnt/two", fs: "xfs", source: "/dev/sdc1"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("mounts %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("mount %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLinuxContainerCount(t *testing.T) {
+	hex := strings.Repeat("ab", 32)
+	cases := []struct {
+		name  string
+		dirs  []string
+		files []string
+		want  int // -1: no runtime, no count
+	}{
+		{"proxmox, cgroup v2",
+			[]string{"lxc/101/ns", "lxc/102", "lxc.monitor/101", "lxc.monitor/102", "lxc.pivot", "system.slice/pve-container@101.service"},
+			[]string{"cgroup.controllers", "lxc/cgroup.procs", "lxc/cpu.max"}, 2},
+		{"proxmox, cgroup v1",
+			[]string{"memory/lxc/101", "cpu,cpuacct/lxc/101", "pids/lxc/101", "systemd/lxc/101", "memory/lxc/105"}, nil, 2},
+		{"lxc 4 on cgroup v1",
+			[]string{"memory/lxc.payload.web", "memory/lxc.monitor.web", "pids/lxc.payload.web", "memory/lxc.pivot"}, nil, 1},
+		{"docker systemd driver, cgroup v1",
+			[]string{"systemd/system.slice/docker-" + hex + ".scope", "systemd/system.slice/docker.service",
+				"memory/system.slice/docker-" + hex + ".scope", "systemd/system.slice/containerd.service"}, nil, 1},
+		{"docker systemd driver, hybrid",
+			[]string{"systemd/system.slice/docker-" + hex + ".scope", "unified/system.slice/docker-" + hex + ".scope"}, nil, 1},
+		{"docker systemd driver, cgroup v2",
+			[]string{"system.slice/docker-" + hex + ".scope", "system.slice/docker-" + strings.Repeat("cd", 32) + ".scope"}, []string{"cgroup.controllers"}, 2},
+		{"no runtime", []string{"system.slice/sshd.service"}, []string{"cgroup.controllers"}, -1},
+	}
+	for _, tc := range cases {
+		root := t.TempDir()
+		for _, d := range tc.dirs {
+			if err := os.MkdirAll(filepath.Join(root, "sys/fs/cgroup", d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, f := range tc.files {
+			linuxTPut(t, root, "sys/fs/cgroup/"+f, "")
+		}
+		n, ok := newLinuxCollector(root).countContainers()
+		if !ok {
+			n = -1
+		}
+		if n != tc.want {
+			t.Errorf("%s: %d containers, want %d", tc.name, n, tc.want)
+		}
 	}
 }
 

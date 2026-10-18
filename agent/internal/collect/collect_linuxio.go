@@ -457,6 +457,8 @@ var (
 	// daemon) is gone, so they are asked from a goroutine with a deadline.
 	linuxSlowFS = map[string]bool{"nfs": true, "nfs4": true, "cifs": true, "smb3": true, "fuseblk": true}
 	// Mounts under these belong to container runtimes and snaps, not users.
+	// A filesystem mounted at one of them (a disk for /var/lib/docker, often
+	// the one that fills up) is the user's and stays.
 	linuxHiddenMounts = []string{"/snap/", "/var/snap/", "/var/lib/docker/", "/var/lib/containers/", "/var/lib/kubelet/",
 		"/var/lib/lxd/", "/var/lib/incus/", "/var/lib/rancher/", "/var/lib/snapd/", "/run/containerd/", "/run/docker/",
 		"/run/k3s/", "/proc/", "/sys/", "/dev/"}
@@ -474,7 +476,7 @@ func linuxVolumeMounts(mounts []linuxMount) []linuxMount {
 		}
 		hidden := false
 		for _, p := range linuxHiddenMounts {
-			hidden = hidden || strings.HasPrefix(m.point+"/", p)
+			hidden = hidden || strings.HasPrefix(m.point, p)
 		}
 		if hidden {
 			continue
