@@ -34,10 +34,13 @@ import (
 
 const (
 	winExeName      = "rex-boing-agent.exe"
-	winNewName      = "rex-boing-agent.new.exe"
 	winOldName      = "rex-boing-agent.old.exe"
-	winInstallTmp   = "rex-boing-agent.install.tmp"
 	winMaxAgentSize = 512 << 20
+	// The temporary copies that upgrade and install write. Each run makes
+	// its own (os.CreateTemp), so two at once never write into one file;
+	// CleanupOld removes any that a killed run left.
+	winNewPattern     = "rex-boing-agent.*.new.exe"
+	winInstallPattern = "rex-boing-agent.*.install.tmp"
 )
 
 func executableName() string { return winExeName }
@@ -182,7 +185,12 @@ func winInstallExecutable() (string, bool, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", false, err
 	}
-	tmp := filepath.Join(dir, winInstallTmp)
+	f, err := os.CreateTemp(dir, winInstallPattern)
+	if err != nil {
+		return "", false, err
+	}
+	tmp := f.Name()
+	f.Close()
 	if err := winCopyFile(src, tmp); err != nil {
 		os.Remove(tmp)
 		return "", false, err
@@ -501,11 +509,11 @@ func upgrade(r io.Reader, sha256Hex string, size int64) wire.Result {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return winFail("upgrade-failed", err.Error())
 	}
-	newPath := filepath.Join(dir, winNewName)
-	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	f, err := os.CreateTemp(dir, winNewPattern)
 	if err != nil {
-		return winFail("upgrade-failed", "Could not create "+newPath+": "+err.Error())
+		return winFail("upgrade-failed", "Could not create a file in "+dir+": "+err.Error())
 	}
+	newPath := f.Name()
 	h := sha256.New()
 	n, err := io.CopyN(io.MultiWriter(f, h), r, size)
 	if err == nil {
@@ -565,8 +573,9 @@ func upgrade(r io.Reader, sha256Hex string, size int64) wire.Result {
 }
 
 // CleanupOld deletes executables left behind by earlier upgrades and
-// uninstalls. The agent calls it at the start of every run; files still in
-// use by an older, still-running session are skipped and retried next time.
+// uninstalls, and the temporary files of runs that were killed. The agent
+// calls it at the start of every run; files still in use by an older,
+// still-running session are skipped and retried next time.
 func CleanupOld() {
 	clean := func(dir string, match func(name string) bool) {
 		entries, err := os.ReadDir(dir)
@@ -584,6 +593,12 @@ func CleanupOld() {
 	})
 	clean(os.TempDir(), func(n string) bool {
 		return strings.HasPrefix(n, "rex-boing-agent-") && strings.HasSuffix(n, ".old.exe")
+	})
+	// Older agents wrote rex-boing-agent.new.exe and .install.tmp; these
+	// patterns cover those names too.
+	removeStale(installDir(), func(n string) bool {
+		return (strings.HasPrefix(n, "rex-boing-agent.") && (strings.HasSuffix(n, ".new.exe") || strings.HasSuffix(n, ".install.tmp"))) ||
+			strings.HasPrefix(n, ".history.json.")
 	})
 }
 

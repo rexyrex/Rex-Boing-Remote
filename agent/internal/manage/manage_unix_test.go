@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // unixTestKey builds a structurally valid OpenSSH public key line.
@@ -186,6 +187,53 @@ func TestInstallRejectsBadKeys(t *testing.T) {
 	}
 	if got := unixKeyLine(`/home/o'neil/"x"/agent`, unixKey{typ: "ssh-ed25519", blob: "AAAA"}, "m"); got != `restrict,command="'/home/o'\''neil/\"x\"/agent' ssh" ssh-ed25519 AAAA rex-boing-remote:m` {
 		t.Errorf("quoting %s", got)
+	}
+}
+
+// Root on someone else's home (sudo keeping HOME) is refused; anyone on
+// their own home, root included, is not.
+func TestRootRefusesSomeoneElsesHome(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs a directory that root does not own")
+	}
+	home := t.TempDir()
+	if _, foreign := unixForeignHome(home, os.Geteuid()); foreign {
+		t.Errorf("a user's own home was taken for someone else's")
+	}
+	if owner, foreign := unixForeignHome(home, 0); !foreign || owner != os.Getuid() {
+		t.Errorf("root on uid %d's home: owner %d, foreign %v", os.Getuid(), owner, foreign)
+	}
+	if _, foreign := unixForeignHome("/", 0); foreign {
+		t.Errorf("root on a root-owned directory was refused")
+	}
+}
+
+// CleanupOld removes the temporary files of killed runs once they are an
+// hour old, and nothing else.
+func TestCleanupOldRemovesStaleTemporaries(t *testing.T) {
+	home := unixTestHome(t)
+	dir := filepath.Join(home, ".local/share/rex-boing-remote")
+	os.MkdirAll(dir, 0o755)
+	old := time.Now().Add(-2 * time.Hour)
+	files := map[string]bool{ // name: should go
+		".rex-boing-agent-upgrade-123": true, ".rex-boing-agent.rbr-456": true, ".history.json.789": true,
+		"rex-boing-agent": false, "history.json": false, ".other-123": false,
+	}
+	for name := range files {
+		path := filepath.Join(dir, name)
+		os.WriteFile(path, []byte("x"), 0o600)
+		os.Chtimes(path, old, old)
+	}
+	fresh := filepath.Join(dir, ".rex-boing-agent-upgrade-999") // an upgrade in progress
+	os.WriteFile(fresh, []byte("x"), 0o600)
+	CleanupOld()
+	for name, gone := range files {
+		if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) != gone {
+			t.Errorf("%s: removed %v, want %v", name, os.IsNotExist(err), gone)
+		}
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("removed a temporary file still being written: %v", err)
 	}
 }
 

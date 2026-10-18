@@ -5,6 +5,10 @@ package manage
 
 import (
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
 )
@@ -47,3 +51,25 @@ func InstallDir() string { return installDir() }
 
 // ExecutableName is the agent's file name on this OS.
 func ExecutableName() string { return executableName() }
+
+// staleAfter is how old a temporary file must be before CleanupOld takes it
+// for one that a killed upgrade, install or history save left behind, and
+// not one that a run in progress is still writing.
+const staleAfter = time.Hour
+
+// removeStale deletes the files in dir whose names (lower-cased) match and
+// that are older than staleAfter.
+func removeStale(dir string, match func(name string) bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !match(strings.ToLower(e.Name())) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > staleAfter {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}

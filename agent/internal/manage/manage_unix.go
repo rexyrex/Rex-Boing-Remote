@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
@@ -291,6 +292,39 @@ func unixAuthorizedKeys(create bool) (string, error) {
 	return path, nil
 }
 
+// unixForeignHome reports, when euid is root's, whether home belongs to
+// someone else, and who. A sudo that keeps HOME runs the agent as root on
+// another user's home: everything it wrote there (the install directory,
+// ~/.ssh, authorized_keys) would be root's, which the user could not change
+// and sshd, reading their keys as them, could not read.
+func unixForeignHome(home string, euid int) (owner int, foreign bool) {
+	if euid != 0 {
+		return 0, false
+	}
+	fi, err := os.Stat(home)
+	if err != nil {
+		return 0, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid == 0 {
+		return 0, false
+	}
+	return int(st.Uid), true
+}
+
+// unixRefuseForeignHome is the error result for unixForeignHome, or ok.
+func unixRefuseForeignHome() (wire.Result, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return wire.Result{}, true
+	}
+	if owner, foreign := unixForeignHome(home, os.Geteuid()); foreign {
+		return unixFail("wrong-user", "This runs as root, but the home directory %s belongs to user %d (sudo kept HOME). "+
+			"Run it as that user, without sudo.", home, owner), false
+	}
+	return wire.Result{}, true
+}
+
 // unixCopyExecutable puts the running executable at dest unless it already
 // runs from there, and reports whether it did.
 func unixCopyExecutable(dest string) (bool, error) {
@@ -333,6 +367,9 @@ func install(o InstallOptions) wire.Result {
 	label = unixSanitizeLabel(label)
 	if label == "" {
 		label = "mac"
+	}
+	if r, ok := unixRefuseForeignHome(); !ok {
+		return r
 	}
 
 	dir := installDir()
@@ -380,6 +417,9 @@ func install(o InstallOptions) wire.Result {
 }
 
 func uninstall() wire.Result {
+	if r, ok := unixRefuseForeignHome(); !ok {
+		return r
+	}
 	details := map[string]string{}
 	keyFile, err := unixAuthorizedKeys(false)
 	if err != nil {
