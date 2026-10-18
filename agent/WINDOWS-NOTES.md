@@ -136,8 +136,9 @@ No battery: section omitted.
 ### processes (full only, at most one scan per 0.9 s)
 Toolhelp32 snapshot (pid, ppid, threads, exe name; pid 0 "System Idle
 Process" is left out). Then `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`:
-`GetProcessTimes` (CPU % of one core from deltas; creation time → `start`
-µs), `GetProcessMemoryInfo` (WorkingSetSize), `GetProcessIoCounters`
+`GetProcessTimes` (CPU % of one core from deltas; a process created since
+the last scan, which has no previous reading, gets its CPU time since
+creation over its age; creation time → `start` µs), `GetProcessMemoryInfo` (WorkingSetSize), `GetProcessIoCounters`
 (Read/WriteTransferCount deltas → diskRead/diskWrite; note this counts all
 I/O, network and device included), `QueryFullProcessImageNameW` (path,
 cached per process). Denied handles keep name/pid/threads only. State is
