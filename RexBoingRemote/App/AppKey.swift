@@ -13,11 +13,14 @@ import SystemConfiguration
 enum AppKey {
     enum Failure: LocalizedError {
         case generation(String)
+        case unreadable(String)
 
         var errorDescription: String? {
             switch self {
             case .generation(let detail):
                 return "Couldn't create Rex Boing Remote's SSH key. \(detail)"
+            case .unreadable(let detail):
+                return "Couldn't read Rex Boing Remote's SSH key. \(detail)"
             }
         }
     }
@@ -26,14 +29,35 @@ enum AppKey {
     static func publicKey() throws -> String {
         // Demo mode shows a made-up key and never creates the real one.
         if Demo.isActive { return Demo.publicKey }
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: Paths.privateKey.path)
-            || !fileManager.fileExists(atPath: Paths.publicKey.path) {
-            try generate()
-        }
+        try ensureKeyPair(privateKey: Paths.privateKey, publicKey: Paths.publicKey)
         let line = try String(contentsOf: Paths.publicKey, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return line
+    }
+
+    /// Makes sure both halves of the key exist. The private half is what
+    /// every server has authorised, so it is only ever created when there is
+    /// none: a missing public half is rebuilt from it, and one that can't be
+    /// read is an error, never a reason to start over with a new pair that
+    /// no server knows.
+    static func ensureKeyPair(privateKey: URL, publicKey: URL) throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: privateKey.path) else {
+            try generate(privateKey: privateKey, publicKey: publicKey)
+            return
+        }
+        guard !fileManager.fileExists(atPath: publicKey.path) else { return }
+        let derived = Run.sync(SSH.keygen, ["-y", "-P", "", "-f", privateKey.path])
+        let fields = derived.stdout.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        guard derived.status == 0, fields.count >= 2 else {
+            throw Failure.unreadable(derived.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        // ssh-keygen prints the key's comment too where the file keeps one;
+        // the agent takes the Mac's label from it.
+        let line = fields.count >= 3 ? fields.joined(separator: " ") : fields.joined(separator: " ") + " " + comment
+        do { try (line + "\n").write(to: publicKey, atomically: true, encoding: .utf8) } catch {
+            throw Failure.generation(error.localizedDescription)
+        }
     }
 
     /// The comment the key carries; servers show it next to the key, and the
@@ -47,16 +71,16 @@ enum AppKey {
         return "rex-boing-remote:" + String(safe).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    private static func generate() throws {
-        try? FileManager.default.removeItem(at: Paths.privateKey)
-        try? FileManager.default.removeItem(at: Paths.publicKey)
+    private static func generate(privateKey: URL, publicKey: URL) throws {
+        // A public half without its private one is of no use to anyone.
+        try? FileManager.default.removeItem(at: publicKey)
         let result = Run.sync(
-            "/usr/bin/ssh-keygen",
-            ["-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", Paths.privateKey.path])
+            SSH.keygen,
+            ["-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", privateKey.path])
         guard result.status == 0 else {
             throw Failure.generation(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        chmod(Paths.privateKey.path, 0o600)
+        chmod(privateKey.path, 0o600)
     }
 }
 
@@ -85,9 +109,23 @@ enum Run {
         process.standardOutput = out
         process.standardError = err
         process.standardInput = input == nil ? FileHandle.nullDevice : inPipe
+        // Told by the termination handler, not by waitUntilExit() on another
+        // thread: that sometimes never returns for a child that has long
+        // exited (seen on macOS 27 with children that exit within
+        // milliseconds, like `ssh -G`), which turned a 50 ms command into
+        // a ten-second timeout.
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
 
+        do {
+            try process.run()
+        } catch {
+            return Result(status: -1, stdout: "", stderr: error.localizedDescription)
+        }
         // Read both pipes concurrently: a child that fills one pipe while we
-        // block on the other never exits.
+        // block on the other never exits. Only once it runs, though: if it
+        // never started, nothing would ever close the pipes, and the readers
+        // would wait for an end of file forever.
         final class Box: @unchecked Sendable { var data = Data() }
         let outBox = Box(), errBox = Box()
         let group = DispatchGroup()
@@ -101,11 +139,6 @@ enum Run {
             errBox.data = err.fileHandleForReading.readDataToEndOfFile()
             group.leave()
         }
-        do {
-            try process.run()
-        } catch {
-            return Result(status: -1, stdout: "", stderr: error.localizedDescription)
-        }
         if let input {
             DispatchQueue.global().async {
                 try? inPipe.fileHandleForWriting.write(contentsOf: input)
@@ -113,11 +146,6 @@ enum Run {
             }
         }
         let deadline = DispatchTime.now() + timeout
-        let finished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            process.waitUntilExit()
-            finished.signal()
-        }
         if finished.wait(timeout: deadline) == .timedOut {
             process.terminate()
             _ = finished.wait(timeout: .now() + 2)

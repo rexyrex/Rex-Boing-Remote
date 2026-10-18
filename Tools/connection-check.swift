@@ -148,6 +148,79 @@ struct ConnectionCheck {
               && SSH.isUsableDestination("alex@nas.local") && SSH.isUsableDestination("nas"),
               "a typed destination that would read as an option, or has spaces, is refused")
 
+        // MARK: The app's own files
+
+        // A missing public key is rebuilt from the private one, which every
+        // server has authorised; only a missing private key means a new pair.
+        let keyDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("rbr-key-\(getpid())")
+        try? FileManager.default.removeItem(at: keyDirectory)
+        try? FileManager.default.createDirectory(at: keyDirectory, withIntermediateDirectories: true)
+        let privateKey = keyDirectory.appendingPathComponent("id_ed25519")
+        let publicKey = keyDirectory.appendingPathComponent("id_ed25519.pub")
+        func read(_ url: URL) -> String? { try? String(contentsOf: url, encoding: .utf8) }
+        try? AppKey.ensureKeyPair(privateKey: privateKey, publicKey: publicKey)
+        let firstPublic = read(publicKey)
+        let firstPrivate = read(privateKey)
+        try? FileManager.default.removeItem(at: publicKey)
+        try? AppKey.ensureKeyPair(privateKey: privateKey, publicKey: publicKey)
+        check(firstPublic != nil && read(publicKey) == firstPublic && read(privateKey) == firstPrivate,
+              "a deleted public key is rebuilt from the private one, comment and all")
+        try? FileManager.default.removeItem(at: privateKey)
+        try? AppKey.ensureKeyPair(privateKey: privateKey, publicKey: publicKey)
+        check(read(privateKey) != nil && read(publicKey) != firstPublic, "a missing private key makes a new pair")
+        try? "not a key".write(to: privateKey, atomically: true, encoding: .utf8)
+        try? FileManager.default.removeItem(at: publicKey)
+        check((try? AppKey.ensureKeyPair(privateKey: privateKey, publicKey: publicKey)) == nil && read(privateKey) == "not a key",
+              "an unreadable private key is an error, not replaced")
+        try? FileManager.default.removeItem(at: keyDirectory)
+
+        // The setup sessions' sockets live in a directory only this user
+        // can enter, whoever made /tmp/rbr-<uid> first.
+        let sockets = FileManager.default.temporaryDirectory.appendingPathComponent("rbr-sockets-\(getpid())").path
+        try? FileManager.default.removeItem(atPath: sockets)
+        try? FileManager.default.createDirectory(atPath: sockets, withIntermediateDirectories: true)
+        let theirs = sockets + "/theirs"
+        try? FileManager.default.createDirectory(atPath: theirs, withIntermediateDirectories: true)
+        try? FileManager.default.createSymbolicLink(atPath: sockets + "/planted", withDestinationPath: theirs)
+        FileManager.default.createFile(atPath: sockets + "/file", contents: nil)
+        let fallback = sockets + "/fallback"
+        check(Paths.controlDirectory(preferred: sockets + "/planted", fallback: fallback) == fallback
+              && Paths.controlDirectory(preferred: sockets + "/file", fallback: fallback) == fallback,
+              "a symlink or a file in the way is not used for sockets")
+        chmod(theirs, 0o755)
+        var socketInfo = stat()
+        let open = Paths.controlDirectory(preferred: theirs, fallback: fallback)
+        stat(theirs, &socketInfo)
+        check(open == theirs && socketInfo.st_mode & 0o777 == 0o700, "a directory of ours open to others is closed first")
+        check(Paths.controlDirectory(preferred: sockets + "/new", fallback: fallback) == sockets + "/new",
+              "and a new one is made private")
+        // ssh adds a dot and 16 characters while it sets a socket up, and a
+        // socket path has 103 bytes.
+        let longest = (NSTemporaryDirectory() as NSString).appendingPathComponent("rbr") + "/12345678.1234567890123456"
+        check(longest.utf8.count <= 103, "the fallback leaves room for ssh's socket names (\(longest.utf8.count) bytes)")
+        try? FileManager.default.removeItem(atPath: sockets)
+
+        // A command that exits at once is reported at once, every time, not
+        // after the timeout (waitUntilExit sometimes missed such exits).
+        setenv("FAKE_SSH_SCENARIO", "none", 1)
+        setenv("FAKE_SSH_COUNTER", "/dev/null", 1)
+        var slowest = 0.0
+        for _ in 0..<40 {
+            let started = Date()
+            _ = Run.sync(SSH.ssh, ["-G", "--", "fake"], timeout: 10)
+            slowest = max(slowest, Date().timeIntervalSince(started))
+        }
+        check(slowest < 2, "a quick command's end is noticed at once (slowest of 40: \(String(format: "%.2f", slowest)) s)")
+
+        // A command that can't start leaves no threads or pipes behind.
+        func openFiles() -> Int { (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? 0 }
+        let filesBefore = openFiles()
+        for _ in 0..<20 {
+            autoreleasepool { _ = Run.sync("/nonexistent/rbr-tool", [], timeout: 1) }
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        check(openFiles() - filesBefore < 8, "a command that can't start leaks nothing (\(openFiles() - filesBefore) more files open)")
+
         // MARK: The saved list
 
         // A list from another version still loads: keys it didn't have take
