@@ -114,7 +114,9 @@ enum LaunchAgent {
     }
 
     /// Starts the background agent again on a freshly upgraded binary, and
-    /// waits for it to answer.
+    /// waits (up to 8 seconds) for it to answer: the app asks for history
+    /// once, right after its next session's hello, and would otherwise find
+    /// serve still starting and go without it for that whole session.
     @discardableResult
     static func restart() -> Bool {
         guard installed else { return false }
@@ -126,7 +128,7 @@ enum LaunchAgent {
             started = domains.contains { launchctl(["bootstrap", $0, plistPath]).status == 0 }
         }
         guard started else { return false }
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(8)
         while Background.status(timeout: 0.5) == nil, Date() < deadline { usleep(100_000) }
         return true
     }

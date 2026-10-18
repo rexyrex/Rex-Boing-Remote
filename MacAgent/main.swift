@@ -58,7 +58,13 @@ func run(_ args: [String]) -> Never {
         Doctor.run(json: rest.contains("--json"))
     case "install":
         let key = option("--key", in: rest) ?? readLine(strippingNewline: true) ?? ""
-        let result = Manage.install(key: key, label: option("--label", in: rest))
+        var result = Manage.install(key: key, label: option("--label", in: rest))
+        // Installing again (the installer, or Repair) put a new binary in
+        // place, which a background agent may still be running the old one
+        // of: restart it, as upgrade does.
+        if result.ok, result.details?["agentCopied"] == "true", LaunchAgent.restart() {
+            result.details = (result.details ?? [:]).merging(["service": "restarted"]) { $1 }
+        }
         printJSON(result)
         exit(result.ok ? 0 : 1)
     case "pair-code":
@@ -408,7 +414,8 @@ enum Manage {
             try fileManager.createDirectory(atPath: installDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
             let me = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
             let self_ = (Bundle.main.executablePath.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }) ?? me
-            if self_ != installedPath {
+            let copied = self_ != installedPath
+            if copied {
                 let temp = installDir + "/.rex-boing-agent.\(getpid())"
                 try? fileManager.removeItem(atPath: temp)
                 try fileManager.copyItem(atPath: self_, toPath: temp)
@@ -434,7 +441,7 @@ enum Manage {
                 try AuthorizedKeys.write(updated, to: path, mode: existing?.mode ?? 0o600)
             }
             return ManageResult(ok: true, message: "Installed. This key can now only start the agent.",
-                                details: ["agentPath": installedPath, "keyFile": path])
+                                details: ["agentPath": installedPath, "keyFile": path, "agentCopied": copied ? "true" : "false"])
         } catch {
             return ManageResult(ok: false, error: "install-failed", message: error.localizedDescription)
         }
