@@ -267,16 +267,36 @@ enum Stream {
         state.seq += 1
         sample.seq = state.seq
         sample.resync = resync
-        write(sample)
+        if !write(sample) {
+            // A reading that is not a number can't be put in JSON. Without
+            // the process table and the sensor list, where such readings
+            // most likely are, then with nothing but its place in the
+            // stream: a sample that never comes would look like a dead
+            // link to the app, which would reconnect again and again.
+            sample.processes = nil
+            sample.thermal?.sensors = nil
+            if !write(sample) {
+                var bare = WireSample()
+                bare.seq = sample.seq
+                bare.t = sample.t
+                bare.interval = state.interval
+                bare.detail = sample.detail
+                bare.resync = true
+                write(bare)
+            }
+        }
         if let count = state.count {
             state.count = count - 1
             if count - 1 <= 0 { exit(0) }
         }
     }
 
-    static func write<T: Encodable>(_ value: T) {
-        guard let data = try? encoder.encode(value) else { return }
+    /// False if the value could not be encoded, and nothing was written.
+    @discardableResult
+    static func write<T: Encodable>(_ value: T) -> Bool {
+        guard let data = try? encoder.encode(value) else { return false }
         writeRaw(data)
+        return true
     }
 
     static func writeRaw(_ data: Data) {

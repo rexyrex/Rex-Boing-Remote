@@ -675,6 +675,36 @@ struct ConnectionCheck {
                   "a restart mid-window keeps the windows it spans (\(restarted.medium.points.count) of \(ranOn.medium.points.count) half-minutes, "
                   + "\(restarted.coarse.points.count) of \(ranOn.coarse.points.count) five-minute points)")
 
+            // A process reading that is not a number neither keeps a table
+            // from being beaten nor stops the history from being written.
+            var busy = HistoryRings(interval: 2, started: base)
+            func processTable(at seconds: Int64, cpu: [Double], interval: Double = 15) -> WireProcesses {
+                var table = WireProcesses()
+                table.count = cpu.count
+                table.sampledAt = baseMS + seconds * 1000
+                table.interval = interval
+                table.rows = cpu.enumerated().map { index, value in
+                    var row = WireProcessRow()
+                    row.pid = Int32(index + 1)
+                    row.name = "p\(index + 1)"
+                    row.cpu = value
+                    row.memory = 1000
+                    return row
+                }
+                return table
+            }
+            busy.add(processes: processTable(at: 10, cpu: [.nan, 20]))
+            busy.add(processes: processTable(at: 20, cpu: [70, 10]))
+            busy.add(processes: processTable(at: 30, cpu: [99], interval: .infinity))
+            busy.add(processes: processTable(at: 40, cpu: [99], interval: .nan))
+            busy.add(processes: processTable(at: 1000, cpu: [.infinity, 5]))
+            let busyWire = try? JSONDecoder().decode(WireHistory.self, from: busy.encoded())
+            let keptTables = busyWire?.processes ?? []
+            check(keptTables.count == 2 && keptTables.first?.sampledAt == baseMS + 20_000
+                  && keptTables.allSatisfy { ($0.rows ?? []).allSatisfy { $0.cpu?.isFinite == true } },
+                  "a NaN or infinite process reading is kept as 0, and tables still compete and are written "
+                  + "(\(keptTables.map { ($0.sampledAt ?? 0) - baseMS }))")
+
             // The half-minute and five minutes the app had open when it went
             // away must not cut the agent's record short when they close.
             var resumed = HistoryRings(interval: 2, started: base)

@@ -338,7 +338,10 @@ struct HistoryRings: Sendable {
     /// Offers one process table. Each quarter hour keeps the table of its
     /// busiest moment, trimmed to the leaders by CPU and by memory.
     mutating func add(processes table: WireProcesses) {
-        guard let at = table.sampledAt, at > 0, (table.interval ?? 0) > 0, !(table.rows ?? []).isEmpty else { return }
+        // An interval that is not a positive number is not a measurement,
+        // and JSON could not carry it.
+        guard let at = table.sampledAt, at > 0, let interval = table.interval, interval.isFinite, interval > 0,
+              !(table.rows ?? []).isEmpty else { return }
         if at < processEnd - Int64(Self.processStep * 1000) {
             processes.removeAll { ($0.sampledAt ?? 0) >= at }
             processBest = nil
@@ -350,7 +353,7 @@ struct HistoryRings: Sendable {
             processBest = nil
         }
         processEnd = end
-        let score = (table.rows ?? []).reduce(0) { $0 + ($1.cpu ?? 0) }
+        let score = Self.score(table.rows ?? [])
         if processBest == nil || score > processScore {
             processBest = Self.trim(table)
             processScore = score
@@ -359,6 +362,23 @@ struct HistoryRings: Sendable {
         processes.removeAll { ($0.sampledAt ?? 0) <= cut }
     }
 
+    /// A reading that is not a number, as 0.
+    static func finite(_ value: Double?) -> Double {
+        guard let value, value.isFinite else { return 0 }
+        return value
+    }
+
+    /// How busy a table's moment was: the CPU across its rows. A row whose
+    /// CPU is not a number counts as idle, so one bad reading can't make
+    /// the score NaN, which loses every comparison and keeps the table.
+    static func score(_ rows: [WireProcessRow]) -> Double {
+        rows.reduce(0) { $0 + finite($1.cpu) }
+    }
+
+    /// The leaders by CPU and by memory, with only the columns history
+    /// shows. A CPU that is not a number is kept as 0: JSON can't carry
+    /// it, and one such table would take every table with it out of the
+    /// history message for as long as it was kept.
     static func trim(_ table: WireProcesses) -> WireProcesses {
         let rows = table.rows ?? []
         func leaders(_ value: (WireProcessRow) -> Double) -> [Int32] {
@@ -368,7 +388,7 @@ struct HistoryRings: Sendable {
                 .compactMap(\.pid)
         }
         var rank: [String: [Int32]] = [:]
-        let cpu = leaders { $0.cpu ?? 0 }
+        let cpu = leaders { finite($0.cpu) }
         let memory = leaders { Double($0.memory ?? 0) }
         if !cpu.isEmpty { rank["cpu"] = cpu }
         if !memory.isEmpty { rank["memory"] = memory }
@@ -386,7 +406,7 @@ struct HistoryRings: Sendable {
             kept.user = row.user
             kept.start = row.start
             kept.cmd = row.cmd.map { truncate($0, bytes: maxCommand) }
-            kept.cpu = row.cpu.map { ($0 * 10).rounded() / 10 }
+            kept.cpu = row.cpu.map { (finite($0) * 10).rounded() / 10 }
             kept.memory = row.memory
             kept.threads = row.threads
             return kept
@@ -505,7 +525,7 @@ struct HistoryRings: Sendable {
         if let last = tables.popLast() {
             processes = tables
             processBest = last
-            processScore = (last.rows ?? []).reduce(0) { $0 + ($1.cpu ?? 0) }
+            processScore = Self.score(last.rows ?? [])
             processEnd = Self.bucketEnd(last.sampledAt ?? 0, step: Self.processStep)
         }
     }
