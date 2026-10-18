@@ -12,7 +12,8 @@
 #   --key KEY        the Mac's public key line (required unless --uninstall)
 #   --label NAME     what to call that Mac on this server (default: from the key)
 #   --version vX.Y.Z install a specific release instead of the latest
-#   --uninstall      remove the agent and the keys it installed
+#   --uninstall      remove the agent, its background service and the keys
+#                    it installed (fetching the agent first if its file is gone)
 #
 # Every download is checked against the release's SHA256SUMS, and that file
 # against the project's signing key when ssh-keygen can verify signatures.
@@ -35,25 +36,49 @@ while [ $# -gt 0 ]; do
         --label) LABEL="${2:-}"; shift 2 ;;
         --version) VERSION="${2:-}"; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,20p' "$0" 2>/dev/null || true; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0" 2>/dev/null || true; exit 0 ;;
         *) fail "unknown option: $1" ;;
     esac
 done
 
+# Root under a sudo that keeps HOME would put the agent and the key in
+# another user's home as root's files, which that user cannot change and
+# sshd, reading their keys as them, cannot read: their key logins would stop.
+if [ "$(id -u)" -eq 0 ]; then
+    HOME_OWNER=$(ls -ldnL "$HOME" 2>/dev/null | awk '{print $3}')
+    if [ -n "$HOME_OWNER" ] && [ "$HOME_OWNER" != 0 ]; then
+        fail "you are root, but HOME ($HOME) belongs to another user (uid $HOME_OWNER). Run this as that user, without sudo."
+    fi
+fi
+
+# Whether the agent left anything to remove: its directory, a key line it
+# installed, or its service.
+agent_left_traces() {
+    [ -e "$INSTALL_DIR" ] ||
+        grep -qs 'rex-boing-remote:' "$HOME/.ssh/authorized_keys" ||
+        [ -e "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rex-boing-agent.service" ] ||
+        [ -e "$HOME/Library/LaunchAgents/com.rexyrex.rex-boing-remote.agent.plist" ]
+}
+
 if [ "$UNINSTALL" -eq 1 ]; then
     if [ -x "$INSTALL_DIR/rex-boing-agent" ]; then
         "$INSTALL_DIR/rex-boing-agent" uninstall
-    else
-        say "The agent isn't installed for $(id -un)."
+        exit 0
     fi
-    exit 0
-fi
+    if ! agent_left_traces; then
+        say "The agent isn't installed for $(id -un)."
+        exit 0
+    fi
+    # Its keys or its service outlived the agent's own file: download the
+    # agent (checked as for an install) to remove them.
+    say "The agent's file is missing, but it left keys or a service behind."
+else
+    [ -n "$KEY" ] || fail "missing --key. Copy the full command from Rex Boing Remote › Add Server."
 
-[ -n "$KEY" ] || fail "missing --key. Copy the full command from Rex Boing Remote › Add Server."
-
-if [ "$(id -u)" -eq 0 ]; then
-    say "Note: you are root, so Rex Boing Remote will log in as root. Many servers forbid that;"
-    say "running this as the normal user you want to monitor with is better."
+    if [ "$(id -u)" -eq 0 ]; then
+        say "Note: you are root, so Rex Boing Remote will log in as root. Many servers forbid that;"
+        say "running this as the normal user you want to monitor with is better."
+    fi
 fi
 
 case "$(uname -s)" in
@@ -79,7 +104,10 @@ else
     BASE="https://github.com/$REPO/releases/download/$VERSION"
 fi
 
-TMP=$(mktemp -d 2>/dev/null || mktemp -d -t rbr)
+# Not in /tmp: the agent runs from here, and hardened systems mount /tmp
+# noexec.
+mkdir -p "$HOME/.local/share"
+TMP=$(mktemp -d "$HOME/.local/share/.rex-boing-install.XXXXXX") || fail "couldn't create a temporary directory in $HOME/.local/share."
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 fetch() {
@@ -97,8 +125,23 @@ fetch "$BASE/$ASSET" "$TMP/rex-boing-agent" || fail "couldn't download $BASE/$AS
 fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" || fail "couldn't download the checksums."
 
 # Signatures need OpenSSH 8.1 or later; older systems rely on the checksum.
+# ssh-keygen cannot say its version, so ask ssh, or else sshd, which comes
+# from the same release: a server can have openssh-server without the
+# client (RHEL's openssh-clients). sshd -V prints the version, and an sshd
+# too old to know -V prints it in its usage message.
+openssh_version() {
+    {
+        ssh -V 2>&1 || true
+        for sshd in "$(command -v sshd 2>/dev/null || true)" /usr/sbin/sshd /usr/local/sbin/sshd; do
+            if [ -n "$sshd" ] && [ -x "$sshd" ]; then
+                "$sshd" -V 2>&1 || true
+                break
+            fi
+        done
+    } | sed -n 's/^OpenSSH_\([0-9]*\)\.\([0-9]*\).*/\1 \2/p' | head -n 1
+}
 openssh_can_verify() {
-    v=$(ssh -V 2>&1 | sed -n 's/^OpenSSH_\([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+    v=$(openssh_version)
     [ -n "$v" ] || return 1
     set -- $v
     [ "$1" -gt 8 ] || { [ "$1" -eq 8 ] && [ "$2" -ge 1 ]; }
@@ -123,6 +166,12 @@ else
 fi
 [ "$EXPECTED" = "$ACTUAL" ] || fail "the download's checksum doesn't match. Nothing was installed."
 chmod 755 "$TMP/rex-boing-agent"
+
+if [ "$UNINSTALL" -eq 1 ]; then
+    # It finds the keys and the service from HOME, not from where it runs.
+    "$TMP/rex-boing-agent" uninstall
+    exit 0
+fi
 
 if [ -n "$LABEL" ]; then
     printf '%s\n' "$KEY" | "$TMP/rex-boing-agent" install --label "$LABEL" >"$TMP/result" || { cat "$TMP/result"; fail "install failed."; }
