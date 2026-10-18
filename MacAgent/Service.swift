@@ -103,6 +103,7 @@ enum LaunchAgent {
         }
         let stopped = Background.stop()
         try? FileManager.default.removeItem(atPath: Background.historyFile)
+        Background.removeTemporaryRunDirectory()
         if hadPlist {
             return ManageResult(ok: true, message: "History is off: the LaunchAgent and the history it kept were removed.",
                                 details: ["removed": plistPath])

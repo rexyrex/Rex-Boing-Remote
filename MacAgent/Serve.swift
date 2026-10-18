@@ -27,6 +27,24 @@ enum Background {
 
     static var runDirectory: String { (socketPath as NSString).deletingLastPathComponent }
 
+    /// Removes the socket directory a long home directory made serve keep
+    /// in this user's temporary directory, once no serve holds its lock.
+    /// The usual one, in the install directory, goes with the agent.
+    static func removeTemporaryRunDirectory() {
+        let run = runDirectory
+        guard run != Manage.installDir + "/run", privateDirectory(run, create: false) else { return }
+        let lockPath = run + "/serve.lock"
+        let lock = open(lockPath, O_RDWR)
+        if lock >= 0 {
+            defer { close(lock) }
+            // Held: a serve still runs there.
+            guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { return }
+            unlink(lockPath)
+        }
+        unlink(socketPath)
+        rmdir(run)
+    }
+
     /// Makes sure `path` is a real directory owned by this user that no one
     /// else can enter, creating it if asked.
     static func privateDirectory(_ path: String, create: Bool) -> Bool {
