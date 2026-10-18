@@ -52,7 +52,8 @@ func TestOrderPairAddresses(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
 	}
-	for name, virtual := range map[string]bool{"docker0": true, "br-1a2b": true, "veth12": true, "virbr0": true, "eth0": false, "tailscale0": false, "wlan0": false} {
+	for name, virtual := range map[string]bool{"docker0": true, "br-1a2b3c4d5e6f": true, "veth12": true, "virbr0": true,
+		"eth0": false, "tailscale0": false, "wlan0": false, "br-lan": false, "br-wan": false, "br-ex": false, "br-1A2B3C4D5E6F": false} {
 		if pairVirtualInterface(name) != virtual {
 			t.Errorf("pairVirtualInterface(%q) != %v", name, virtual)
 		}
@@ -88,6 +89,24 @@ func TestSSHDPortAndHostKeys(t *testing.T) {
 	write("loop", "Include loop\n")
 	if p := sshdPort(filepath.Join(dir, "loop")); p != 22 {
 		t.Errorf("include loop port %d", p)
+	}
+	// Tabs and "=" separate a keyword from its value as well as spaces do,
+	// and a byte order mark must not hide the first line.
+	for name, content := range map[string]string{
+		"tab":        "Port\t2201\n",
+		"equals":     "Port = 2201\n",
+		"bom":        "\ufeffPort 2201\r\n",
+		"tabinclude": "Include\tsshd_config.d/30-tab.conf\nPort 22\n",
+	} {
+		write(name, content)
+		write("sshd_config.d/30-tab.conf", "Port\t2201\n")
+		if p := sshdPort(filepath.Join(dir, name)); p != 2201 {
+			t.Errorf("%s: port %d, want 2201", name, p)
+		}
+	}
+	write("tabmatch", "Match\tUser git\n  Port 9999\n")
+	if p := sshdPort(filepath.Join(dir, "tabmatch")); p != 22 {
+		t.Errorf("port inside a tab-separated Match %d", p)
 	}
 
 	write("ssh_host_rsa_key.pub", "ssh-rsa AAAAB3NzaC1yc2E= root@box\n")

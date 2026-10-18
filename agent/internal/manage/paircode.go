@@ -91,13 +91,29 @@ func pairAddresses(hostname string) []string {
 // pairVirtualInterface names interfaces that belong to container runtimes
 // and hypervisors on this machine.
 func pairVirtualInterface(name string) bool {
-	for _, p := range []string{"docker", "br-", "veth", "virbr", "lxcbr", "lxdbr", "incusbr", "cni", "flannel",
+	for _, p := range []string{"docker", "veth", "virbr", "lxcbr", "lxdbr", "incusbr", "cni", "flannel",
 		"cali", "vxlan", "kube", "podman", "vmnet", "vboxnet", "tap"} {
 		if strings.HasPrefix(name, p) {
 			return true
 		}
 	}
-	return false
+	return pairDockerBridge(name)
+}
+
+// pairDockerBridge reports a Docker network's bridge, "br-" and the first
+// 12 hex digits of the network's ID. Other bridges called br-something, such
+// as OpenWrt's br-lan, carry the machine's real addresses.
+func pairDockerBridge(name string) bool {
+	id, ok := strings.CutPrefix(name, "br-")
+	if !ok || len(id) != 12 {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // orderPairAddresses sorts addresses: private LAN ranges (RFC 1918) first,
@@ -149,14 +165,19 @@ func sshdPortIn(path, base string, depth int) int {
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	// A config saved by Notepad starts with a byte order mark, which would
+	// otherwise hide the first keyword.
+	text := strings.TrimPrefix(string(data), "\ufeff")
+	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
 			continue
 		}
-		key, rest, _ := strings.Cut(line, " ")
-		if k, v, ok := strings.Cut(key, "="); ok { // "Port=2222"
-			key, rest = k, v+" "+rest
+		// As sshd reads it: the keyword ends at the first space, tab or "="
+		// ("Port 2222", "Port\t2222", "Port=2222", "Port = 2222").
+		key, rest := line, ""
+		if i := strings.IndexAny(line, " \t="); i >= 0 {
+			key, rest = line[:i], line[i+1:]
 		}
 		args := strings.Fields(strings.TrimLeft(rest, "= \t"))
 		switch strings.ToLower(key) {
