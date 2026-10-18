@@ -15,7 +15,8 @@ swiftc -swift-version 5 -parse-as-library -I "$P" -o .build/checks/connection-ch
     Tools/connection-check.swift \
     RexBoingRemote/Connection/SSH.swift RexBoingRemote/Connection/AgentSession.swift \
     RexBoingRemote/Connection/ServerConnection.swift RexBoingRemote/Connection/LocalNetwork.swift \
-    RexBoingRemote/Model/Server.swift RexBoingRemote/App/Paths.swift Shared/History.swift \
+    RexBoingRemote/Model/Server.swift RexBoingRemote/Model/PairingCode.swift \
+    RexBoingRemote/App/Paths.swift Shared/History.swift \
     RexBoingRemote/App/AppKey.swift RexBoingRemote/App/Askpass.swift \
     RexBoingRemote/Demo/Demo.swift RexBoingRemote/Demo/Replay.swift \
     "$P/RexBoingKit.o" \

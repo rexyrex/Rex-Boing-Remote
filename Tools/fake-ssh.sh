@@ -2,7 +2,15 @@
 # A stand-in for /usr/bin/ssh, for Tools/connection-check.swift. Behaves
 # according to the scenario in $FAKE_SSH_SCENARIO and counts its own runs in
 # $FAKE_SSH_COUNTER, so a scenario can change behaviour between attempts.
-for arg in "$@"; do [ "$arg" = "-G" ] && exit 0; done
+# With $FAKE_SSH_LOG set, every run's arguments are appended to it, one line
+# each; $FAKE_SSH_G_DELAY makes `ssh -G` take that many seconds.
+[ -n "${FAKE_SSH_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+for arg in "$@"; do
+    if [ "$arg" = "-G" ]; then
+        [ -n "${FAKE_SSH_G_DELAY:-}" ] && sleep "$FAKE_SSH_G_DELAY"
+        exit 0
+    fi
+done
 
 n=$(( $(cat "$FAKE_SSH_COUNTER" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$FAKE_SSH_COUNTER"
@@ -36,7 +44,9 @@ case "$FAKE_SSH_SCENARIO" in
     hang-then-recover)
         if [ "$n" -eq 1 ]; then
             stream 2
-            sleep 600
+            # exec, so the watchdog's signal ends the sleep too instead of
+            # leaving it running on its own for ten minutes.
+            exec sleep 600
         fi
         stream 1000 ;;
     refused)

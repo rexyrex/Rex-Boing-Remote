@@ -323,7 +323,7 @@ final class SSHBrowser: ObservableObject {
                 return nil
             }
             let local = Set([SCDynamicStoreCopyComputerName(nil, nil) as String?].compactMap { $0 })
-            let hosts = Array(Set(names.filter { !local.contains($0) }.map { Self.hostName(for: $0) })).sorted()
+            let hosts = Array(Set(names.filter { !local.contains($0) }.compactMap { Self.hostName(for: $0) })).sorted()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { reference.value?.found = hosts }
             }
@@ -338,11 +338,13 @@ final class SSHBrowser: ObservableObject {
     }
 
     /// A Bonjour service name ("Alex's Mac mini") as an mDNS host name
-    /// ("Alexs-Mac-mini.local"), which is what ssh connects to.
-    nonisolated static func hostName(for service: String) -> String {
+    /// ("Alexs-Mac-mini.local"), which is what ssh connects to. Any machine
+    /// on the network can advertise any name, so one that would start with
+    /// "-" loses the dashes, and one with nothing left is not offered.
+    nonisolated static func hostName(for service: String) -> String? {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
         let hyphenated = service.replacingOccurrences(of: " ", with: "-")
-        let cleaned = String(hyphenated.unicodeScalars.filter { allowed.contains($0) })
-        return cleaned + ".local"
+        let cleaned = String(hyphenated.unicodeScalars.filter { allowed.contains($0) }).drop { $0 == "-" }
+        return cleaned.isEmpty ? nil : cleaned + ".local"
     }
 }

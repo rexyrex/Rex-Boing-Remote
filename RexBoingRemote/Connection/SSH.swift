@@ -77,8 +77,28 @@ enum SSH {
             // host is involved, which may need the agent to get through.
             if avoidAgent { args += ["-o", "IdentityAgent=none"] }
         }
-        args.append(target.destination)
+        args += destination(target)
         return args
+    }
+
+    /// The destination, after "--". ssh reads options after the host name
+    /// too, so without it a destination (or a user name inside one) that
+    /// starts with "-" would be taken as an option: "-oProxyCommand=…" runs
+    /// a command on this Mac. After "--", ssh takes it as the destination
+    /// and refuses it if it is not a valid one. Every ssh and sftp command
+    /// line the app builds ends with this, then the remote command if any.
+    static func destination(_ target: Target) -> [String] {
+        ["--", target.destination]
+    }
+
+    /// Whether a destination the user typed or picked can be handed to ssh
+    /// as one: something there, no whitespace or control characters, and
+    /// no leading "-", which can only be a mistake (or a planted name).
+    static func isUsableDestination(_ destination: String) -> Bool {
+        !destination.isEmpty && !destination.hasPrefix("-")
+            && !destination.unicodeScalars.contains {
+                CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0)
+            }
     }
 
     /// The interactive setup session: prompts allowed (answered by the app's
@@ -99,7 +119,7 @@ enum SSH {
     }
 
     static func setupCommand(_ target: Target, controlPath: String, command: [String]) -> [String] {
-        ["-T"] + setup(target, controlPath: controlPath) + [target.destination] + command
+        ["-T"] + setup(target, controlPath: controlPath) + destination(target) + command
     }
 
     /// `sftp` over the setup session's control socket.
@@ -109,13 +129,13 @@ enum SSH {
             // sftp spells the port option -P.
             args[index] = "-P"
         }
-        args.append(target.destination)
+        args += destination(target)
         return args
     }
 
     /// Closes the setup session's shared connection.
     static func closeMaster(_ target: Target, controlPath: String) {
-        _ = Run.sync(ssh, ["-o", "ControlPath=\(quoted(controlPath))", "-O", "exit", target.destination], timeout: 5)
+        _ = Run.sync(ssh, ["-o", "ControlPath=\(quoted(controlPath))", "-O", "exit"] + destination(target), timeout: 5)
     }
 
     /// The environment for setup: prompts go to the app's askpass dialogs.
@@ -139,7 +159,7 @@ enum SSH {
     /// Resolves what `~/.ssh/config` says about a destination, without
     /// connecting. Used to find jump hosts and the effective user and port.
     static func resolve(_ destination: String) async -> [String: String] {
-        let result = await Run.async(ssh, ["-G", destination], timeout: 10)
+        let result = await Run.async(ssh, ["-G", "--", destination], timeout: 10)
         var config: [String: String] = [:]
         for line in result.stdout.split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 1)

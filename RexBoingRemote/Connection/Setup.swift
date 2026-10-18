@@ -89,6 +89,10 @@ final class Setup: ObservableObject {
         defer { isRunning = false; if step != .done { step = nil } }
         let destination = rawDestination.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !destination.isEmpty else { throw Failure(message: "Enter a server.") }
+        guard SSH.isUsableDestination(destination) else {
+            throw Failure(message: "That isn't a host name or an SSH alias. Enter it as user@host, host or an alias from ~/.ssh/config, without spaces or a leading \"-\".")
+        }
+        if let port, !(1...65535).contains(port) { throw Failure(message: "The port must be between 1 and 65535.") }
 
         step = .connecting
         let publicKey: String
