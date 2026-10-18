@@ -117,9 +117,28 @@ final class ServerConnection: ObservableObject, Identifiable {
     /// When the current problem began, for "offline for 3 minutes".
     @Published private(set) var downSince: Date?
 
-    /// What the screen needs from this server right now.
-    var demand: Demand = .vitals {
-        didSet { if oldValue != demand { sendDemand() } }
+    /// What the screen needs from this server right now: everything while
+    /// any dashboard shows it (the popover's and the window's may both),
+    /// vitals otherwise.
+    var demand: Demand { viewers > 0 ? .full : .vitals }
+    private var viewers = 0
+
+    /// Claims full detail for a view showing this server's dashboard, until
+    /// the lease is gone. Leases are counted, so one dashboard closing never
+    /// takes the detail away from another still showing the same server;
+    /// and they give it back when deallocated, so a view torn down without
+    /// `onDisappear` (a popover's content released) can't leave it on.
+    func addViewer() -> ViewerLease { ViewerLease(self) }
+
+    fileprivate func viewerAdded() {
+        viewers += 1
+        if viewers == 1 { sendDemand() }
+    }
+
+    fileprivate func viewerRemoved() {
+        guard viewers > 0 else { return }
+        viewers -= 1
+        if viewers == 0 { sendDemand() }
     }
 
     /// Seconds between samples while only vitals are wanted.
@@ -595,6 +614,28 @@ final class ServerConnection: ObservableObject, Identifiable {
             return "The connection dropped."
         }
         return String(line.prefix(200))
+    }
+}
+
+/// One dashboard's claim on a server's full detail; see
+/// `ServerConnection.addViewer()`. An `ObservableObject` only so a view can
+/// hold it as a `@StateObject`, which lives exactly as long as the view.
+@MainActor
+final class ViewerLease: ObservableObject {
+    private let connection: ServerConnection
+
+    fileprivate init(_ connection: ServerConnection) {
+        self.connection = connection
+        connection.viewerAdded()
+    }
+
+    deinit {
+        let connection = connection
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { connection.viewerRemoved() }
+        } else {
+            Task { @MainActor in connection.viewerRemoved() }
+        }
     }
 }
 

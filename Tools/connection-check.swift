@@ -405,13 +405,24 @@ struct ConnectionCheck {
         }
         // An open dashboard asks for everything, and the process table comes.
         let dashboard = demo[0].connection
-        dashboard.demand = .full
+        var popoverDashboard: ViewerLease? = dashboard.addViewer()
+        var windowDashboard: ViewerLease? = dashboard.addViewer()
         deadline = Date().addingTimeInterval(8)
         while Date() < deadline && dashboard.processHistory.samples.count < 2 {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
         check(dashboard.processHistory.samples.count >= 2,
               "a demo dashboard gets the process table (\(dashboard.processHistory.samples.count) tables)")
+        // The popover closing leaves the window's dashboard at full detail;
+        // the last one going takes it back to vitals.
+        popoverDashboard = nil
+        let tablesBefore = dashboard.processHistory.samples.count
+        RunLoop.main.run(until: Date().addingTimeInterval(2))
+        check(dashboard.demand == .full && dashboard.processHistory.samples.count > tablesBefore,
+              "one of two dashboards closing keeps the other's process table coming")
+        windowDashboard = nil
+        check(dashboard.demand == .vitals && popoverDashboard == nil && windowDashboard == nil,
+              "and the last one closing goes back to vitals")
         demo.forEach { $0.connection.stop() }
         RunLoop.main.run(until: Date().addingTimeInterval(1))
         check(!FileManager.default.fileExists(atPath: demoCounter.path), "demo mode never runs ssh")

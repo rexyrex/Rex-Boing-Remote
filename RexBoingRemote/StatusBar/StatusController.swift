@@ -235,9 +235,10 @@ final class StatusController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         // Release the SwiftUI tree, or it keeps observing every connection.
+        // A dashboard in it gives back its claim on full detail as it goes;
+        // one in the window keeps its own.
         popover.contentViewController = nil
         navigation.selected = nil
-        for connection in fleet.connections.values { connection.demand = .vitals }
     }
 
     private func showMenu(for item: RexItem) {

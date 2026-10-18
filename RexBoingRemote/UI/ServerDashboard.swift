@@ -8,6 +8,18 @@ struct ServerDashboard: View {
     @ObservedObject var settings: AppSettings
     var back: () -> Void
     var openSettings: () -> Void
+    /// Full detail from the server for as long as this dashboard exists.
+    @StateObject private var viewer: ViewerLease
+
+    init(server: Server, connection: ServerConnection, settings: AppSettings,
+         back: @escaping () -> Void, openSettings: @escaping () -> Void) {
+        self.server = server
+        self.connection = connection
+        self.settings = settings
+        self.back = back
+        self.openSettings = openSettings
+        _viewer = StateObject(wrappedValue: connection.addViewer())
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,11 +42,7 @@ struct ServerDashboard: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear {
-            connection.demand = .full
-            connection.refreshHistory()
-        }
-        .onDisappear { connection.demand = .vitals }
+        .onAppear { connection.refreshHistory() }
         .environment(\.machineNoun, server.os == "darwin" ? "Mac" : "machine")
         .environment(\.processControl, ProcessControl(isLocal: false))
     }
