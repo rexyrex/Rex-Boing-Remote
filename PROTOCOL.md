@@ -321,9 +321,11 @@ table every 15 seconds, into the rings the history message describes. It:
   * Linux and macOS: the Unix socket `<install dir>/run/serve.sock`, mode
     0600, in a directory of mode 0700 owned by the user. Connections from
     other users are refused (`SO_PEERCRED`, `getpeereid`). When a long home
-    directory makes that path too long for a socket, it is
-    `rex-boing-remote-<uid>/serve.sock` in the temporary directory instead,
-    with the same checks;
+    directory makes that path too long for a socket, the Go agent uses
+    `/tmp/rex-boing-remote-<uid>/serve.sock` instead (a fixed `/tmp`, since a
+    service and an SSH session may not share `$TMPDIR`), with the same
+    checks, and removes that directory when history is turned off. The
+    macOS agent uses the same name in the user's own temporary directory;
   * Windows: the named pipe `\\.\pipe\rex-boing-remote-<user SID>`, owned by
     the user, with an ACL that grants only the user, and closed to remote
     clients. Clients check the pipe's owner before they use it.

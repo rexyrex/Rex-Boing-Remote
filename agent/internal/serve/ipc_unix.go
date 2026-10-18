@@ -18,15 +18,49 @@ import (
 // 104 bytes on macOS and the BSDs, 108 on Linux, including the NUL).
 const maxSocketPath = 100
 
+// fallbackBase holds the endpoint's directory when <dir>/run/serve.sock is
+// too long for a socket. It is /tmp, not $TMPDIR: the service manager and an
+// SSH session can have different temporary directories (pam_tmpdir gives
+// each session its own), and both must find the same socket. Tests point it
+// elsewhere.
+var fallbackBase = "/tmp"
+
 // socketPath is where serve listens: <dir>/run/serve.sock, or, when a long
 // home directory makes that too long for a socket, a per-user directory in
-// the temporary directory.
+// fallbackBase.
 func socketPath(dir string) string {
 	p := filepath.Join(dir, "run", "serve.sock")
 	if len(p) <= maxSocketPath {
 		return p
 	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("rex-boing-remote-%d", os.Getuid()), "serve.sock")
+	return filepath.Join(fallbackBase, fmt.Sprintf("rex-boing-remote-%d", os.Getuid()), "serve.sock")
+}
+
+// removeEndpoint deletes the fallback directory, unless a serve still holds
+// its lock there or it is not this user's. The directory inside dir needs
+// nothing: it goes with dir.
+func removeEndpoint(dir string) error {
+	run := filepath.Dir(socketPath(dir))
+	if run == filepath.Join(dir, "run") {
+		return nil
+	}
+	fi, err := os.Lstat(run)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !fi.IsDir() || !ok || int(st.Uid) != os.Getuid() {
+		return nil
+	}
+	if lock, err := os.OpenFile(filepath.Join(run, "serve.lock"), os.O_RDWR, 0); err == nil {
+		defer lock.Close()
+		if unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+			return nil // a serve still runs there
+		}
+	}
+	return os.RemoveAll(run)
 }
 
 // privateDir makes sure path is a real directory (not a symlink) owned by

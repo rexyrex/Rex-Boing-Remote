@@ -338,6 +338,13 @@ func Stop(dir string, timeout time.Duration) error {
 	return err
 }
 
+// RemoveEndpoint deletes what the endpoint left outside dir: on Unix, the
+// directory in /tmp that holds the socket when a long home directory makes
+// <dir>/run/serve.sock too long for one. Turning history off and
+// uninstalling call it once the serve has stopped; while one still runs,
+// it leaves the endpoint alone.
+func RemoveEndpoint(dir string) error { return removeEndpoint(dir) }
+
 // WaitStopped waits until no serve answers, up to timeout.
 func WaitStopped(dir string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)

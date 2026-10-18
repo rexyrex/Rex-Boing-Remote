@@ -186,6 +186,7 @@ func Uninstall(dir string) wire.Result {
 	}
 	stopped := stopRunning(dir)
 	os.Remove(filepath.Join(dir, serve.HistoryFile))
+	serve.RemoveEndpoint(dir)
 	switch {
 	case removed:
 		return wire.Result{OK: true, Message: "History is off: the background service and the history it kept were removed.",

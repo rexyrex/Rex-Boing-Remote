@@ -187,6 +187,10 @@ func (l *pipeListener) Close() error {
 
 func (l *pipeListener) Address() string { return l.name }
 
+// removeEndpoint has nothing to remove: a pipe goes away with its last
+// handle.
+func removeEndpoint(dir string) error { return nil }
+
 // dial connects to this user's serve, refusing a pipe this user does not own.
 func dial(dir string, timeout time.Duration) (conn, error) {
 	name, sid, err := pipeName()

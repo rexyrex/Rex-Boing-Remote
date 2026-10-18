@@ -24,8 +24,10 @@ func Install(agentPath, dir string) wire.Result {
 func Uninstall(dir string) wire.Result {
 	if serve.Stop(dir, 2*time.Second) == nil {
 		serve.WaitStopped(dir, 5*time.Second)
+		serve.RemoveEndpoint(dir)
 		return wire.Result{OK: true, Message: "History is off: the background agent was stopped."}
 	}
+	serve.RemoveEndpoint(dir)
 	return wire.Result{OK: true, Message: "History was already off."}
 }
 
