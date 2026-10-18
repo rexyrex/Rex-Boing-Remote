@@ -241,9 +241,12 @@ func (w *writer) line(v any) error {
 
 // sample writes a sample, degrading it rather than dropping the session when
 // it cannot be encoded (a NaN slipped through) or is too long for the app.
+// The process table and the sensor list come out first: they are the
+// largest sections, and the ones most readings go into, so the rest of the
+// sample usually survives without them.
 func (w *writer) sample(s *wire.Sample) error {
 	b, err := json.Marshal(s)
-	if err == nil && len(b)+1 > MaxLine {
+	if err != nil || len(b)+1 > MaxLine {
 		s.Processes = nil
 		if s.Thermal != nil {
 			s.Thermal.Sensors = nil

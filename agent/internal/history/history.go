@@ -280,7 +280,9 @@ func (r *Recorder) fold(t *tier, b *bucket, p Point) {
 // trimmed to the leaders by CPU and by memory: the table that answers "what
 // was running when the graph peaked".
 func (r *Recorder) AddProcesses(p *wire.Processes) {
-	if p == nil || p.SampledAt <= 0 || p.Interval <= 0 || len(p.Rows) == 0 {
+	// NaN fails "<= 0" as well as "> 0": a table whose interval is not a
+	// positive number is not a measurement, and JSON could not carry it.
+	if p == nil || p.SampledAt <= 0 || !(finite(p.Interval) > 0) || len(p.Rows) == 0 {
 		return
 	}
 	if p.SampledAt < r.procEnd-ProcessStep.Milliseconds() {
@@ -295,10 +297,7 @@ func (r *Recorder) AddProcesses(p *wire.Processes) {
 		r.procBest = nil
 	}
 	r.procEnd = end
-	score := 0.0
-	for _, row := range p.Rows {
-		score += row.CPU
-	}
+	score := processScore(p.Rows)
 	if r.procBest == nil || score > r.procScore {
 		trimmed := trimProcesses(p)
 		r.procBest, r.procScore = &trimmed, score
@@ -310,8 +309,29 @@ func (r *Recorder) AddProcesses(p *wire.Processes) {
 	}
 }
 
+// finite returns v, or 0 for NaN and the infinities.
+func finite(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return v
+}
+
+// processScore is how busy a table's moment was: the CPU across its rows.
+// A row whose CPU is not a number counts as idle, so one bad reading cannot
+// make the score NaN (which loses every comparison).
+func processScore(rows []wire.ProcessRow) float64 {
+	score := 0.0
+	for _, row := range rows {
+		score += finite(row.CPU)
+	}
+	return score
+}
+
 // trimProcesses keeps the processRows leaders by CPU and by memory, with
-// only the columns history shows.
+// only the columns history shows. A CPU that is not a number is kept as 0:
+// a table holding NaN could not be encoded, and would take every table
+// with it out of the history message for as long as it was kept.
 func trimProcesses(p *wire.Processes) wire.Processes {
 	leaders := func(value func(*wire.ProcessRow) float64) []int32 {
 		idx := make([]int, len(p.Rows))
@@ -331,7 +351,7 @@ func trimProcesses(p *wire.Processes) wire.Processes {
 	rank := map[string][]int32{}
 	keep := map[int32]bool{}
 	for metric, value := range map[string]func(*wire.ProcessRow) float64{
-		"cpu":    func(r *wire.ProcessRow) float64 { return r.CPU },
+		"cpu":    func(r *wire.ProcessRow) float64 { return finite(r.CPU) },
 		"memory": func(r *wire.ProcessRow) float64 { return float64(r.Memory) },
 	} {
 		if pids := leaders(value); len(pids) > 0 {
@@ -347,7 +367,7 @@ func trimProcesses(p *wire.Processes) wire.Processes {
 			continue
 		}
 		rows = append(rows, wire.ProcessRow{PID: row.PID, Name: row.Name, User: row.User, Start: row.Start,
-			Cmd: truncate(row.Cmd, maxCmd), CPU: row.CPU, Memory: row.Memory, Threads: row.Threads})
+			Cmd: truncate(row.Cmd, maxCmd), CPU: finite(row.CPU), Memory: row.Memory, Threads: row.Threads})
 	}
 	return wire.Processes{Count: p.Count, SampledAt: p.SampledAt, Interval: p.Interval,
 		GPUAttribution: false, Rows: rows, Rank: rank}
@@ -506,6 +526,10 @@ func (r *Recorder) Load(data []byte, now time.Time) error {
 		return errors.New("not a history file")
 	}
 	nowMS := now.UnixMilli()
+	// The finest tier, and the time of each tier's last point, as saved:
+	// before anything has aged out.
+	var fine []Point
+	var savedMedium, savedCoarse int64
 	for _, raw := range m.Tiers {
 		step, points, err := decodeTier(raw)
 		if err != nil {
@@ -528,8 +552,33 @@ func (r *Recorder) Load(data []byte, now time.Time) error {
 				t.points = append(t.points, p)
 			}
 		}
+		var last int64
+		if n := len(t.points); n > 0 {
+			last = t.points[n-1].T
+		}
+		switch t {
+		case &r.fine:
+			fine = append([]Point(nil), t.points...)
+		case &r.medium:
+			savedMedium = last
+		case &r.coarse:
+			savedCoarse = last
+		}
 		t.prune(nowMS)
 	}
+	// The windows still open when the rings were saved are in no coarser
+	// tier yet, only in the finest. Fold its points into them again (not
+	// into the finest tier, which has them), so the window that spans a
+	// restart ends with the same point as if serve had kept running. This
+	// goes by the rings as saved: a window that closed while serve was down
+	// still gets all of its points, even where the finest tier no longer
+	// reaches back that far.
+	r.mediumBucket, r.coarseBucket = bucket{}, bucket{}
+	r.refold(&r.medium, &r.mediumBucket, fine, savedMedium)
+	r.refold(&r.coarse, &r.coarseBucket, fine, savedCoarse)
+	r.medium.prune(nowMS)
+	r.coarse.prune(nowMS)
+
 	r.procs = r.procs[:0]
 	cut := nowMS - ProcessSpan.Milliseconds()
 	for _, p := range m.Processes {
@@ -544,13 +593,19 @@ func (r *Recorder) Load(data []byte, now time.Time) error {
 		// same quarter hour.
 		last := r.procs[n-1]
 		r.procs = r.procs[:n-1]
-		score := 0.0
-		for _, row := range last.Rows {
-			score += row.CPU
-		}
-		r.procBest, r.procScore, r.procEnd = &last, score, bucketEnd(last.SampledAt, ProcessStep)
+		r.procBest, r.procScore, r.procEnd = &last, processScore(last.Rows), bucketEnd(last.SampledAt, ProcessStep)
 	}
 	return nil
+}
+
+// refold folds the fine points after last, the end of t's last saved
+// window, into b, the window t has open.
+func (r *Recorder) refold(t *tier, b *bucket, fine []Point, last int64) {
+	for _, p := range fine {
+		if p.T > last {
+			r.fold(t, b, p)
+		}
+	}
 }
 
 func decodeTier(raw map[string]json.RawMessage) (step float64, points []Point, err error) {

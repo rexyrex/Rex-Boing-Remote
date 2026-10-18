@@ -24,6 +24,9 @@ type fakeCollector struct {
 	notices  []wire.Notice
 	closed   bool
 	sampleAt []time.Time
+	// nanProcess puts a NaN in the process table and an infinity in the
+	// sensors, and nowhere else.
+	nanProcess bool
 }
 
 func (f *fakeCollector) Host() wire.Host        { return wire.Host{Hostname: "fake", LogicalCores: 2} }
@@ -46,6 +49,11 @@ func (f *fakeCollector) Sample(d wire.Detail) *wire.Sample {
 	s := &wire.Sample{Interval: 1, Resync: n == 1, CPU: &wire.CPU{Total: 0.25}}
 	if f.nan {
 		s.CPU.Total = math.NaN()
+	}
+	if f.nanProcess {
+		s.Processes = &wire.Processes{Count: 1, SampledAt: 1, Interval: 1,
+			Rows: []wire.ProcessRow{{PID: 1, Name: "odd", CPU: math.NaN()}}}
+		s.Thermal = &wire.Thermal{CPUCelsius: wire.F(50), Sensors: []wire.Sensor{{Key: "x", Celsius: math.Inf(1)}}}
 	}
 	return s
 }
@@ -261,6 +269,33 @@ func TestUnencodableSampleDegrades(t *testing.T) {
 	s.next(t)
 	if m := s.next(t); m.Type != "sample" || m.Seq != 1 || m.CPU != nil || !m.Resync {
 		t.Errorf("NaN sample %+v", m)
+	}
+}
+
+// A NaN in the process table or the sensors costs those sections, not the
+// whole sample.
+func TestUnencodableProcessesDropped(t *testing.T) {
+	f := &fakeCollector{nanProcess: true}
+	s := start(t, f, Options{Interval: 0.5, Count: 2, Log: io.Discard})
+	s.next(t)
+	s.next(t) // the first sample is a resync anyway
+	line, ok := <-s.lines
+	if !ok {
+		t.Fatal("stream ended")
+	}
+	var m struct {
+		message
+		Processes *wire.Processes `json:"processes"`
+		Thermal   *wire.Thermal   `json:"thermal"`
+	}
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("not JSON: %q", line)
+	}
+	if m.Seq != 2 || m.Resync || m.CPU == nil || m.CPU.Total != 0.25 {
+		t.Errorf("the sample lost more than its process table: %s", line)
+	}
+	if m.Processes != nil || m.Thermal == nil || m.Thermal.Sensors != nil || m.Thermal.CPUCelsius == nil {
+		t.Errorf("processes %+v, thermal %+v", m.Processes, m.Thermal)
 	}
 }
 

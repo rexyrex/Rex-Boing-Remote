@@ -192,6 +192,71 @@ func TestProcessTables(t *testing.T) {
 	}
 }
 
+// One process reading that is not a number must not cost history its
+// process tables: a table holding NaN cannot be encoded.
+func TestProcessTablesSurviveNaN(t *testing.T) {
+	r := NewRecorder(2, base)
+	r.AddProcesses(processes(ms(1*time.Minute), wire.ProcessRow{PID: 1, Name: "init", CPU: 3, Memory: 10}))
+	r.AddProcesses(processes(ms(16*time.Minute), wire.ProcessRow{PID: 2, Name: "odd", CPU: math.NaN(), Memory: 20},
+		wire.ProcessRow{PID: 3, Name: "busy", CPU: 9, Memory: 5}))
+	if math.IsNaN(r.procScore) || r.procScore != 9 {
+		t.Errorf("score %v, want 9: a NaN row counts as idle", r.procScore)
+	}
+	odd := processes(ms(17*time.Minute), wire.ProcessRow{PID: 4, Name: "x", CPU: 50, Memory: 1})
+	odd.Interval = math.NaN()
+	r.AddProcesses(odd)
+	r.AddProcesses(processes(ms(31*time.Minute), wire.ProcessRow{PID: 1, Name: "init", CPU: 1, Memory: 10}))
+	var m struct{ Processes []wire.Processes }
+	if err := json.Unmarshal(r.Message(0), &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Processes) != 3 {
+		t.Fatalf("%d process tables, want 3: %+v", len(m.Processes), m.Processes)
+	}
+	second := m.Processes[1]
+	if second.SampledAt != ms(16*time.Minute) {
+		t.Errorf("the table with no interval was kept: %+v", second)
+	}
+	for _, row := range second.Rows {
+		if row.PID == 2 && row.CPU != 0 {
+			t.Errorf("a NaN CPU became %v, want 0", row.CPU)
+		}
+	}
+	if cpu := second.Rank["cpu"]; len(cpu) != 1 || cpu[0] != 3 {
+		t.Errorf("cpu rank %v, want only the busy process", cpu)
+	}
+}
+
+// A serve that restarts in the middle of a window ends that window with
+// the same point as one that kept running: the restored finest tier is
+// folded into the open windows again, and not recorded twice. That holds
+// after a short restart and after one long enough for the finest tier to
+// age out.
+func TestRestartKeepsOpenWindows(t *testing.T) {
+	cpu := func(i int) float64 { return float64(i%13) / 13 }
+	for _, gap := range []time.Duration{0, 20 * time.Minute} {
+		whole, before := NewRecorder(2, base), NewRecorder(2, base)
+		// 400 s in: inside the half minute that ends at 420 s, and the
+		// five minutes that end at 600 s.
+		for i := 1; i <= 200; i++ {
+			whole.Add(sample(ms(time.Duration(i)*2*time.Second), cpu(i)))
+			before.Add(sample(ms(time.Duration(i)*2*time.Second), cpu(i)))
+		}
+		resumed := NewRecorder(2, base)
+		if err := resumed.Load(before.Message(0), base.Add(400*time.Second+gap)); err != nil {
+			t.Fatal(err)
+		}
+		first := 201 + int(gap/(2*time.Second))
+		for i := first; i < first+300; i++ {
+			whole.Add(sample(ms(time.Duration(i)*2*time.Second), cpu(i)))
+			resumed.Add(sample(ms(time.Duration(i)*2*time.Second), cpu(i)))
+		}
+		if got, want := resumed.Message(0), whole.Message(0); string(got) != string(want) {
+			t.Errorf("after a %v restart the rings differ from ones that kept running:\n got %s\nwant %s", gap, got, want)
+		}
+	}
+}
+
 func TestMessageRoundTrip(t *testing.T) {
 	r := NewRecorder(2, base)
 	for i := 1; i <= 400; i++ {
