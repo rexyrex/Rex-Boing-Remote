@@ -171,7 +171,7 @@ func (c *linuxCollector) Sample(detail wire.Detail) *wire.Sample {
 	}
 	c.discover(now)
 
-	c.guard("cpu", func() { s.CPU = c.sampleCPU(resync, now) }, func() { c.cpu = linuxCPUState{} })
+	c.guard("cpu", func() { s.CPU = c.sampleCPU(resync, full, now) }, func() { c.cpu = linuxCPUState{} })
 	var psi linuxPSI
 	havePSI := false
 	c.guard("pressure", func() {

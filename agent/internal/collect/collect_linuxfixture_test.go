@@ -181,6 +181,29 @@ func TestLinuxCPU(t *testing.T) {
 		t.Errorf("load %v threads %d processes %d", *s.CPU.Load, *s.CPU.Threads, *s.CPU.Processes)
 	}
 
+	// Vitals read the clocks every linuxClockEvery and repeat them in
+	// between; full samples read them every time.
+	for i := 0; i < 16; i++ {
+		linuxTPut(t, root, fmt.Sprintf("sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i), "4000000\n")
+	}
+	clock := func(s *wire.Sample) float64 { return linuxTF64(s.CPU.ClockMHz) }
+	if got := clock(c.Sample(wire.DetailVitals)); got != 2500 {
+		t.Errorf("vitals re-read the clocks within %v: %v", linuxClockEvery, got)
+	}
+	if got := clock(c.Sample(wire.DetailFull)); got != 4000 {
+		t.Errorf("full sample clock %v", got)
+	}
+	for i := 0; i < 16; i++ {
+		linuxTPut(t, root, fmt.Sprintf("sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i), "1000000\n")
+	}
+	if s := c.Sample(wire.DetailVitals); clock(s) != 4000 || linuxTF64(s.CPU.PerformanceClockMHz) != 4000 {
+		t.Errorf("vitals clocks between reads: %v, P %v", clock(s), linuxTF64(s.CPU.PerformanceClockMHz))
+	}
+	c.cpu.clocksAt = c.cpu.clocksAt.Add(-linuxClockEvery)
+	if got := clock(c.Sample(wire.DetailVitals)); got != 1000 {
+		t.Errorf("vitals clocks after %v: %v", linuxClockEvery, got)
+	}
+
 	// Baseline: every field at 1000; then 1000 more ticks split
 	// user 600, system 100, idle 200, iowait 50, irq 25, softirq 25.
 	base := [8]uint64{1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000}
@@ -308,6 +331,34 @@ func TestLinuxCoreKinds(t *testing.T) {
 	}
 	if got := kinds(t.TempDir(), 2); got != "??" {
 		t.Errorf("no topology kinds %q", got)
+	}
+
+	// Big cores binned differently (an RK3588S: 1024 and 1001 beside 414)
+	// are all P; a homogeneous chip binned that way has no kinds.
+	for _, tc := range []struct {
+		caps []string
+		want string
+	}{
+		{[]string{"414", "414", "414", "414", "1024", "1024", "1001", "1001"}, "EEEEPPPP"},
+		{[]string{"1024", "1024", "1001", "1001"}, "????"},
+		{[]string{"1024", "1024", "1024", "1024"}, "????"},
+	} {
+		files = map[string]string{}
+		for i, v := range tc.caps {
+			k, val := cpu(i, "cpu_capacity", v)
+			files[k] = val
+		}
+		if got := kinds(tree(files), len(tc.caps)); got != tc.want {
+			t.Errorf("capacities %v: kinds %q, want %q", tc.caps, got, tc.want)
+		}
+	}
+
+	// A homogeneous machine sends no kinds at all.
+	for _, name := range []string{"linux-amd-desktop", "linux-vm", "linux-rpi"} {
+		c, _ := linuxTFixture(t, name)
+		if k := c.Sample(wire.DetailFull).CPU.Kinds; k != "" {
+			t.Errorf("%s sent kinds %q", name, k)
+		}
 	}
 }
 

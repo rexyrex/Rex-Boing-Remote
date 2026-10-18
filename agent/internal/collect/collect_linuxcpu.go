@@ -112,9 +112,17 @@ type linuxCPUState struct {
 
 	topoIDs    []int  // the cpu set the topology below was built for
 	kinds      string // one byte per entry of topoIDs
+	hybrid     bool   // kinds names at least one P or E core
 	kindSource string
 	freqPaths  []string // scaling_cur_freq per entry of topoIDs, "" when absent
 	hasFreq    bool
+
+	// Reading scaling_cur_freq costs an IPI per core on some kernels, so
+	// vitals samples (which only feed the history behind the dashboard's
+	// clock graph) read the clocks every linuxClockEvery and repeat them in
+	// between; full samples read them every time.
+	clocks   [3]*float64 // all, P, E
+	clocksAt time.Time
 
 	// Listing /proc costs about as much as the rest of a vitals sample on a
 	// box with a thousand processes, so the count is refreshed every
@@ -123,10 +131,13 @@ type linuxCPUState struct {
 	procCountAt time.Time
 }
 
-const linuxProcCountEvery = 5 * time.Second
+const (
+	linuxProcCountEvery = 5 * time.Second
+	linuxClockEvery     = 5 * time.Second
+)
 
 // sampleCPU reads /proc/stat, the clocks and the load average.
-func (c *linuxCollector) sampleCPU(resync bool, now time.Time) *wire.CPU {
+func (c *linuxCollector) sampleCPU(resync, full bool, now time.Time) *wire.CPU {
 	data, err := linuxReadInto(c.path("proc/stat"), &c.buf)
 	if err != nil {
 		return nil
@@ -141,7 +152,12 @@ func (c *linuxCollector) sampleCPU(resync bool, now time.Time) *wire.CPU {
 		c.discoverCPUTopology(st.ids)
 	}
 
-	out := &wire.CPU{Kinds: cs.kinds}
+	out := &wire.CPU{}
+	if cs.hybrid {
+		// A homogeneous machine sends no kinds, as on Windows: every core
+		// alike reads the same as every core unknown.
+		out.Kinds = cs.kinds
+	}
 	valid := cs.have && !resync
 	var iowait, steal float64
 	if valid {
@@ -178,7 +194,12 @@ func (c *linuxCollector) sampleCPU(resync bool, now time.Time) *wire.CPU {
 	cs.prevCores = append(cs.prevCores[:0], st.cores...)
 	cs.have = true
 
-	c.sampleClocks(out)
+	if full || cs.clocksAt.IsZero() || now.Sub(cs.clocksAt) >= linuxClockEvery {
+		c.sampleClocks(out)
+		cs.clocks, cs.clocksAt = [3]*float64{out.ClockMHz, out.PerformanceClockMHz, out.EfficiencyClockMHz}, now
+	} else {
+		out.ClockMHz, out.PerformanceClockMHz, out.EfficiencyClockMHz = linuxCopyF(cs.clocks[0]), linuxCopyF(cs.clocks[1]), linuxCopyF(cs.clocks[2])
+	}
 	c.sampleLoad(out)
 	if cs.procCountAt.IsZero() || now.Sub(cs.procCountAt) >= linuxProcCountEvery {
 		cs.procCount, cs.procCountAt = c.countProcesses(), now
@@ -192,6 +213,14 @@ func (c *linuxCollector) sampleCPU(resync bool, now time.Time) *wire.CPU {
 		out.Zombies = &z
 	}
 	return out
+}
+
+// linuxCopyF copies a reading so samples never share one.
+func linuxCopyF(p *float64) *float64 {
+	if p == nil {
+		return nil
+	}
+	return wire.F(*p)
 }
 
 func linuxSameInts(a, b []int) bool {
@@ -220,6 +249,8 @@ func (c *linuxCollector) discoverCPUTopology(ids []int) {
 		}
 	}
 	cs.kinds, cs.kindSource = string(b), source
+	p, e := linuxKindCounts(cs.kinds)
+	cs.hybrid = p+e > 0
 	cs.freqPaths = make([]string, len(ids))
 	cs.hasFreq = false
 	for i, id := range ids {
@@ -236,7 +267,8 @@ func (c *linuxCollector) discoverCPUTopology(ids []int) {
 //
 //  1. Intel hybrid PMUs: /sys/devices/cpu_core/cpus and cpu_atom/cpus (and
 //     cpu_lowpower on newer kernels for the low-power E-cores).
-//  2. Arm capacities: cpu_capacity per cpu; the biggest are P.
+//  2. Arm capacities: cpu_capacity per cpu; the biggest are P, and so are
+//     big cores binned a little lower (1001 beside 1024).
 //  3. cpufreq base_frequency (intel_pstate): the highest group is P. Base
 //     clocks are immune to the favoured-core turbo differences that make
 //     maximum clocks of identical cores disagree.
@@ -275,6 +307,8 @@ func linuxDetectKinds(root string, ids []int) (map[int]byte, string) {
 		}
 		return vals, len(vals) > 0
 	}
+	// split labels cpus within a tenth of the fastest P, the rest E, unless
+	// even the slowest reaches ratio of the fastest (a homogeneous chip).
 	split := func(vals map[int]uint64, ratio float64) bool {
 		var lo, hi uint64
 		for _, v := range vals {
@@ -289,7 +323,7 @@ func linuxDetectKinds(root string, ids []int) (map[int]byte, string) {
 			return false
 		}
 		for id, v := range vals {
-			if v == hi {
+			if float64(v) >= 0.9*float64(hi) {
 				kinds[id] = 'P'
 			} else {
 				kinds[id] = 'E'
@@ -298,7 +332,7 @@ func linuxDetectKinds(root string, ids []int) (map[int]byte, string) {
 		return true
 	}
 	if vals, ok := perCPU("cpu_capacity"); ok {
-		if split(vals, 1) {
+		if split(vals, 0.9) {
 			return kinds, "cpu_capacity"
 		}
 		return kinds, "uniform cpu_capacity"
