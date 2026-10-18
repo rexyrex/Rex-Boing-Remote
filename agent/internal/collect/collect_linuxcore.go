@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/nvidia"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
 )
 
@@ -28,7 +27,7 @@ type linuxCollector struct {
 	ifaceIPv4   func(name string) string
 	lookupUser  func(uid string) string
 	failedUnits func(ctx context.Context) ([]string, error)
-	nvidia      *nvidia.Reader
+	nvidia      linuxNVIDIA
 
 	window Window
 	buf    []byte // scratch for the per-sample /proc reads
@@ -50,6 +49,13 @@ type linuxCollector struct {
 	procs   linuxProcState
 
 	panicked map[string]bool
+}
+
+// linuxNVIDIA is what the collector uses of nvidia.Reader; tests fake it.
+type linuxNVIDIA interface {
+	GPUs() []wire.GPU
+	Asleep() []wire.GPU
+	Err() string
 }
 
 // newLinuxCollector returns a collector for the tree under root with

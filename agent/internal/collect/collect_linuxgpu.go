@@ -53,12 +53,24 @@ type linuxGPUState struct {
 	cards     []*linuxGPU
 	cardNames string // the card list the cache was built from
 	pciNames  map[string]string
+	nvidia    []linuxNVIDIADevice
+}
+
+// linuxNVIDIADevice is an NVIDIA display controller on the PCI bus. nvidia-smi
+// reads the GPUs, but it opens the device to do so, which wakes a laptop's
+// runtime-suspended dGPU; the collector checks runtime_status first.
+type linuxNVIDIADevice struct {
+	device        string // PCI device id, "2684"
+	runtimeStatus string // power/runtime_status, "" when the kernel has none
 }
 
 // discoverGPUs lists /sys/class/drm/cardN and keeps cards already known, so
 // their counters survive a rediscovery.
 func (c *linuxCollector) discoverGPUs() {
 	gs := &c.gpu
+	if c.nvidia != nil {
+		gs.nvidia = c.nvidiaDevices()
+	}
 	var names []string
 	for _, n := range linuxDirNames(c.path("sys/class/drm")) {
 		if strings.HasPrefix(n, "card") && linuxNumeric(n[4:]) {
@@ -84,6 +96,64 @@ func (c *linuxCollector) discoverGPUs() {
 		}
 	}
 	gs.cards, gs.cardNames = cards, key
+}
+
+// nvidiaDevices lists the NVIDIA display controllers in PCI bus order, the
+// order nvidia-smi uses.
+func (c *linuxCollector) nvidiaDevices() []linuxNVIDIADevice {
+	var out []linuxNVIDIADevice
+	base := c.path("sys/bus/pci/devices")
+	for _, d := range linuxDirNames(base) {
+		dir := filepath.Join(base, d)
+		vendor, _ := linuxReadValue(filepath.Join(dir, "vendor"))
+		class, _ := linuxReadValue(filepath.Join(dir, "class"))
+		if vendor != "0x10de" || !strings.HasPrefix(class, "0x03") {
+			continue
+		}
+		dev, _ := linuxReadValue(filepath.Join(dir, "device"))
+		n := linuxNVIDIADevice{device: strings.TrimPrefix(strings.ToLower(dev), "0x")}
+		if p := filepath.Join(dir, "power/runtime_status"); linuxExists(p) {
+			n.runtimeStatus = p
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// nvidiaAsleep reports whether every NVIDIA GPU is runtime-suspended. One
+// that is awake, or whose state the kernel does not show, is read as usual.
+func (c *linuxCollector) nvidiaAsleep() bool {
+	devs := c.gpu.nvidia
+	for _, d := range devs {
+		if d.runtimeStatus == "" {
+			return false
+		}
+		if s, err := linuxReadValue(d.runtimeStatus); err != nil || s != "suspended" {
+			return false
+		}
+	}
+	return len(devs) > 0
+}
+
+// sampleNVIDIA returns nvidia-smi's GPUs, or, while they are all asleep, the
+// same GPUs idle without running it. GPUs that have slept since the agent
+// started are named from pci.ids, as nvidia-smi has never seen them.
+func (c *linuxCollector) sampleNVIDIA() []wire.GPU {
+	if !c.nvidiaAsleep() {
+		return c.nvidia.GPUs()
+	}
+	if gpus := c.nvidia.Asleep(); len(gpus) > 0 {
+		return gpus
+	}
+	var out []wire.GPU
+	for _, d := range c.gpu.nvidia {
+		name := "NVIDIA GPU"
+		if pci := c.pciDeviceName("10de", d.device); pci != "" {
+			name = linuxGPUDisplayName("nvidia", pci)
+		}
+		out = append(out, wire.GPU{Name: name, Vendor: "nvidia"})
+	}
+	return out
 }
 
 // probeGPU inspects one card. Cards of drivers we cannot read (vc4, simpledrm,
@@ -336,7 +406,7 @@ func (c *linuxCollector) sampleGPUs(interval float64, resync, full bool) []wire.
 		out = append(out, w)
 	}
 	if c.nvidia != nil {
-		for _, g := range c.nvidia.GPUs() {
+		for _, g := range c.sampleNVIDIA() {
 			g.Engines = linuxCopyEngines(g.Engines) // never alias the reader's cache
 			out = append(out, g)
 		}

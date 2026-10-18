@@ -32,7 +32,9 @@ func newCollector() Collector {
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		c.failedUnits = linuxSystemctlFailed
 	}
-	c.nvidia = nvidia.NewReader()
+	if r := nvidia.NewReader(); r != nil {
+		c.nvidia = r // never a nil *Reader inside the interface
+	}
 	return c
 }
 

@@ -105,7 +105,13 @@ func (c *linuxCollector) Doctor() []Check {
 			}
 		}
 		if c.nvidia != nil {
-			parts = append(parts, "NVIDIA GPUs through nvidia-smi")
+			if err := c.nvidia.Err(); err != "" {
+				ok = false
+				parts = append(parts, "NVIDIA GPUs through nvidia-smi, but "+err)
+				fix = "Run nvidia-smi on its own to see the error. After a driver update, a driver/library version mismatch lasts until the next reboot."
+			} else {
+				parts = append(parts, "NVIDIA GPUs through nvidia-smi")
+			}
 		} else if c.hasNVIDIADevice() {
 			ok = false
 			parts = append(parts, "an NVIDIA GPU, but no nvidia-smi")

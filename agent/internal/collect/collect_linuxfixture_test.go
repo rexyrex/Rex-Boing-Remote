@@ -431,6 +431,61 @@ func linuxTSensorKeys(th *wire.Thermal) string {
 	return strings.Join(keys, " ")
 }
 
+// linuxTFakeNVIDIA stands in for nvidia.Reader.
+type linuxTFakeNVIDIA struct {
+	gpus, asleep []wire.GPU
+	err          string
+	reads        int // GPUs calls, each of which may run nvidia-smi
+}
+
+func (f *linuxTFakeNVIDIA) GPUs() []wire.GPU   { f.reads++; return f.gpus }
+func (f *linuxTFakeNVIDIA) Asleep() []wire.GPU { return f.asleep }
+func (f *linuxTFakeNVIDIA) Err() string        { return f.err }
+
+func TestLinuxNVIDIASuspended(t *testing.T) {
+	linuxTNeedColons(t)
+	c, root := linuxTFixture(t, "linux-intel-hybrid")
+	nv := &linuxTFakeNVIDIA{gpus: []wire.GPU{{Name: "NVIDIA GeForce RTX 4090 Laptop GPU", Vendor: "nvidia", Utilization: 0.5, Celsius: wire.F(60)}}}
+	c.nvidia = nv
+	dev := "sys/bus/pci/devices/0000:01:00.0/"
+	linuxTPut(t, root, dev+"vendor", "0x10de\n")
+	linuxTPut(t, root, dev+"class", "0x030000\n")
+	linuxTPut(t, root, dev+"device", "0x2684\n")
+	linuxTPut(t, root, dev+"power/runtime_status", "suspended\n")
+	linuxTPut(t, root, "sys/bus/pci/devices/0000:01:00.1/vendor", "0x10de\n") // its HDMI audio function
+	linuxTPut(t, root, "sys/bus/pci/devices/0000:01:00.1/class", "0x040300\n")
+
+	nvidiaOf := func(s *wire.Sample) []wire.GPU {
+		var out []wire.GPU
+		for _, g := range s.GPUs {
+			if g.Vendor == "nvidia" {
+				out = append(out, g)
+			}
+		}
+		return out
+	}
+	// Asleep since the agent started: named from pci.ids, idle, and
+	// nvidia-smi is never run.
+	g := nvidiaOf(c.Sample(wire.DetailVitals))
+	if len(g) != 1 || g[0].Name != "NVIDIA GeForce RTX 4090" || g[0].Utilization != 0 || g[0].Celsius != nil || nv.reads != 0 {
+		t.Fatalf("suspended dGPU %+v after %d nvidia-smi reads", g, nv.reads)
+	}
+	nv.asleep = []wire.GPU{{Name: "NVIDIA GeForce RTX 4090 Laptop GPU", Vendor: "nvidia"}}
+	if g := nvidiaOf(c.Sample(wire.DetailVitals)); len(g) != 1 || g[0].Name != "NVIDIA GeForce RTX 4090 Laptop GPU" || nv.reads != 0 {
+		t.Errorf("suspended dGPU seen before %+v", g)
+	}
+	linuxTPut(t, root, dev+"power/runtime_status", "active\n")
+	if g := nvidiaOf(c.Sample(wire.DetailVitals)); len(g) != 1 || g[0].Utilization != 0.5 || nv.reads != 1 {
+		t.Errorf("awake dGPU %+v after %d reads", g, nv.reads)
+	}
+	// Without runtime PM in sysfs the GPU is always read.
+	os.Remove(filepath.Join(root, dev+"power/runtime_status"))
+	c.rediscoverNext()
+	if c.Sample(wire.DetailVitals); nv.reads != 2 {
+		t.Errorf("nvidia-smi skipped without a runtime_status")
+	}
+}
+
 func TestLinuxThermalIntel(t *testing.T) {
 	c, root := linuxTFixture(t, "linux-intel-hybrid")
 	th := c.Sample(wire.DetailFull).Thermal
@@ -921,12 +976,17 @@ func TestLinuxDoctor(t *testing.T) {
 		t.Errorf("agent check %+v", ch)
 	}
 
-	// Bare metal without a CPU sensor driver gets the modprobe hint.
+	// Bare metal without a CPU sensor driver gets the modprobe hint, and a
+	// failing nvidia-smi is reported.
 	a, aroot := linuxTFixture(t, "linux-amd-desktop")
 	os.RemoveAll(filepath.Join(aroot, "sys/class/hwmon/hwmon2"))
+	a.nvidia = &linuxTFakeNVIDIA{err: "nvidia-smi failed: exit status 18"}
 	for _, ch := range a.Doctor() {
 		if ch.Name == "Sensors" && (ch.OK || !strings.Contains(ch.Fix, "modprobe k10temp")) {
 			t.Errorf("sensors check without k10temp %+v", ch)
+		}
+		if ch.Name == "GPU" && (ch.OK || !strings.Contains(ch.Detail, "exit status 18") || ch.Fix == "") {
+			t.Errorf("GPU check with a failing nvidia-smi %+v", ch)
 		}
 	}
 }

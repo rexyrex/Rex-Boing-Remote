@@ -726,6 +726,9 @@ func (c *winCollector) Doctor() []Check {
 		add("GPU utilization", true, fmt.Sprintf("GPU Engine counters available (one collection takes %v)", c.gpuQ.dur.Round(time.Millisecond)), "")
 	}
 	switch {
+	case c.nv != nil && c.nv.Err() != "":
+		add("NVIDIA", false, "nvidia-smi found, but "+c.nv.Err(),
+			"Run nvidia-smi on its own to see the error; reinstalling the NVIDIA driver fixes a broken installation")
 	case c.nv != nil:
 		add("NVIDIA", true, "nvidia-smi found: temperature, power, fan and clocks for NVIDIA GPUs", "")
 	case hasNvidia:
