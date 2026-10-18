@@ -169,7 +169,9 @@ same as Rex Boing's: they are the same code, shared through the
 - The agent removes passwords and tokens from command lines before they leave
   the server.
 - Release files are checksummed, and the checksums signed with the project's
-  key ([docs/allowed_signers](docs/allowed_signers)); the installers check both.
+  key ([docs/allowed_signers](docs/allowed_signers)). `install.sh` checks
+  both (the signature where OpenSSH 8.1 or later is installed); `install.ps1`
+  checks the checksum only.
 
 See [SECURITY.md](SECURITY.md) for the details and how to report a problem.
 

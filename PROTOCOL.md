@@ -14,10 +14,19 @@ standard input and output. There is no network listener of any kind.
 * The app writes one JSON object per line to the agent's stdin.
 * When stdin reaches end of file, the agent exits immediately. This is how an
   agent notices that the Mac slept, the network dropped or the app quit, so an
-  agent must never outlive its session.
+  agent must never outlive its session. "Immediately" is as soon as it is
+  between samples: a sample being taken is finished first, and so is the
+  history fetch at the start of a session (at most 2 seconds, see "Background
+  history").
 * A line may be at most 1 MiB. The app drops a session that sends a longer one.
 * Unknown keys must be ignored by both sides. Missing keys mean "unknown" or
-  "not available on this machine", never zero.
+  "not available on this machine", never zero, with one exception: a few
+  counters and flags whose zero is common are left out when they are zero
+  (or false), and for those absent means zero or unknown. They are
+  `network.rxTotal`/`txTotal`, `disk.readTotal`/`writeTotal`,
+  `memory.swap.encrypted`, `host.isAppleSilicon` and the host's core counts,
+  and in process rows `user`, `start`, `path`, `cmd`, `gpu`, `energy`,
+  `diskRead`, `diskWrite`, `wakeups` and `threads`.
 
 ## Commands
 
@@ -28,7 +37,7 @@ The agent is one executable with these commands:
 | `stream` | The live session described below. |
 | `version` | Prints one line: `{"name":"rex-boing-agent","version":"0.1.0","protocol":1,"os":"linux","arch":"amd64"}` |
 | `doctor` | A human-readable report of what this machine can and cannot report, and why. `doctor --json` prints the same as JSON. |
-| `install` | Reads one OpenSSH public key line from stdin (or `--key`), adds it to the user's `authorized_keys` restricted to this agent, prints a JSON result. |
+| `install [--label NAME]` | Reads one OpenSSH public key line from stdin (or `--key`), adds it to the user's `authorized_keys` restricted to this agent, prints a JSON result. `--label` names the Mac in the key's comment (default: the key's own comment). It copies itself into the install directory first, unless it already runs from there. When the Go agent did, its details say `"agentCopied":"true"`, and it restarts a running background service on the new binary, like `upgrade`. |
 | `pair-code` | Prints a pairing code for this machine (see below). |
 | `upgrade --sha256 HEX --size N` | Reads exactly N bytes of a new agent from stdin, verifies the hash, replaces itself, prints a JSON result. |
 | `uninstall` | Removes the background service (if any), the keys it installed and its own files, prints a JSON result. |
@@ -117,7 +126,9 @@ to draw from the samples themselves.
 * `history`: send a fresh history message now. It does not change the
   detail. The app only asks agents that sent a history message in this
   session; an agent without background history ignores it.
-* `interval`: seconds between samples, clamped by the agent to 0.5–10.
+* `interval`: seconds between samples, clamped by the agent to 0.5–10. Apps
+  should not send 0 or less: the Go agent takes it as its default (1 second),
+  the macOS agent as 0.5.
 
 The agent applies a request from its next sample on.
 
@@ -298,7 +309,11 @@ from the first sample that there is none. Every key is optional.
 * `processes`: for every quarter hour of the last 24 hours, the process table
   of its busiest moment (the most CPU across the processes listed), in the
   same shape as a sample's `processes`, trimmed to the five leaders by CPU
-  and the five by memory. `interval` is the window that table measured.
+  and the five by memory: `rank` has only `cpu` and `memory`, and the rows
+  keep only `pid`, `name`, `user`, `start`, `cmd` (cut to 200 bytes, at a
+  character boundary, with `…` after a cut), `cpu`, `memory` and `threads`;
+  no `path`, and `gpuAttribution` is false. `interval` is the window that
+  table measured.
 
 The message fits in one line of at most 1 MiB: an agent leaves out the
 process tables, then the finest tier, before it would exceed that.
@@ -310,13 +325,15 @@ history keeps a server sampling while the Mac sleeps or is away, so the
 dashboard can show what happened in the meantime. It is optional, and
 everything else works without it.
 
-`serve` samples vitals every 2 seconds (`--interval`, 0.5–10), and the process
-table every 15 seconds, into the rings the history message describes. It:
+`serve` samples vitals every 2 seconds (`--interval`, 0.5–10; to the Go
+agent, 0 or less means the default), and the process table every 15 seconds,
+into the rings the history message describes. It:
 
 * saves them to `history.json` in the install directory, through a temporary
-  file and a rename, every 10 minutes and when it stops (SIGTERM, Ctrl-C, or a
-  `stop` request), and loads them when it starts, so history survives
-  restarts and reboots. The file is the history message itself, mode 0600;
+  file and a rename, every 10 minutes and when it stops (SIGTERM, Ctrl-C, or
+  a `stop` request; the Go agent also on SIGHUP, unless started under nohup),
+  and loads them when it starts, so history survives restarts and reboots.
+  The file is the history message itself, mode 0600;
 * answers on a local endpoint only, never a TCP port:
   * Linux and macOS: the Unix socket `<install dir>/run/serve.sock`, mode
     0600, in a directory of mode 0700 owned by the user. Connections from
@@ -335,7 +352,8 @@ table every 15 seconds, into the rings the history message describes. It:
 The endpoint speaks one request line and one answer line per connection:
 `{"want":"history"}` (the history message), `{"want":"status"}`
 (`{"type":"status","pid":…,"version":…,"started":…,"interval":…,"oldest":…,"endpoint":…}`)
-and `{"want":"stop"}` (save and exit).
+and `{"want":"stop"}` (`{"type":"stopping"}`, then save and exit). Anything
+else gets `{"type":"error","message":"unknown request"}`.
 
 `stream` asks the endpoint for the history (giving up after 2 seconds) and
 sends it after its hello.
@@ -349,8 +367,12 @@ service manager, as the user, without root:
 | macOS | LaunchAgent `~/Library/LaunchAgents/com.rexyrex.rex-boing-remote.agent.plist` | Loaded into the GUI session, or the background session when no one is logged in at the Mac, and again at every login. |
 | Windows | Scheduled Task `\Rex Boing Remote agent`, at sign-in | Runs unelevated as the user, while the user is signed in (console or Remote Desktop). |
 
-`upgrade` restarts a running service on the new binary. `uninstall-service`
-and `uninstall` remove the service and the history.
+`upgrade` restarts a running service on the new binary, and so does the Go
+agent's `install` when it replaced the binary. The Go agent answers once the
+new `serve` answers (or after 8 seconds), so the next session's history fetch
+finds it. On Linux the unit only starts while the agent's file is there
+(`ConditionPathIsExecutable`).
+`uninstall-service` and `uninstall` remove the service and the history.
 
 ## Versioning
 
