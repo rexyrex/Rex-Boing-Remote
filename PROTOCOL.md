@@ -37,9 +37,9 @@ The agent is one executable with these commands:
 | `stream` | The live session described below. |
 | `version` | Prints one line: `{"name":"rex-boing-agent","version":"0.1.0","protocol":1,"os":"linux","arch":"amd64"}` |
 | `doctor` | A human-readable report of what this machine can and cannot report, and why. `doctor --json` prints the same as JSON. |
-| `install [--label NAME]` | Reads one OpenSSH public key line from stdin (or `--key`), adds it to the user's `authorized_keys` restricted to this agent, prints a JSON result. `--label` names the Mac in the key's comment (default: the key's own comment). It copies itself into the install directory first, unless it already runs from there. When the Go agent did, its details say `"agentCopied":"true"`, and it restarts a running background service on the new binary, like `upgrade`. |
+| `install [--label NAME]` | Reads one OpenSSH public key line from stdin (or `--key`), adds it to the user's `authorized_keys` restricted to this agent, prints a JSON result. `--label` names the Mac in the key's comment (default: the key's own comment). It copies itself into the install directory first, unless it already runs from there. When it did, its details say `"agentCopied":"true"`, and it restarts a running background service on the new binary, like `upgrade`. The Go agent, run as root on another user's home (a `sudo` that kept `HOME`), refuses with `wrong-user`. |
 | `pair-code` | Prints a pairing code for this machine (see below). |
-| `upgrade --sha256 HEX --size N` | Reads exactly N bytes of a new agent from stdin, verifies the hash, replaces itself, prints a JSON result. |
+| `upgrade --sha256 HEX --size N` | Reads exactly N bytes of a new agent from stdin, verifies the hash, replaces itself, prints a JSON result. A macOS agent signed with a Developer ID team accepts only a binary signed by the same team, and refuses anything else with `bad-signature`; an ad-hoc signed one (built from source) accepts any. |
 | `uninstall` | Removes the background service (if any), the keys it installed and its own files, prints a JSON result. |
 | `serve [--interval S]` | Optional background mode: samples on its own and keeps history for `stream` to send (see "Background history"). Runs until stopped. |
 | `install-service` | Registers `serve` with the user's own service manager, starts it, prints a JSON result. |
