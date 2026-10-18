@@ -245,13 +245,25 @@ final class BackgroundServer: @unchecked Sendable {
     }
 
     func handleSignals() {
-        for number in [SIGTERM, SIGINT] {
+        var numbers = [SIGTERM, SIGINT]
+        // A serve run by hand in a terminal that closes gets SIGHUP: save
+        // the history and stop, as for SIGTERM. Under nohup, which ignores
+        // it, it stays ignored: handling it would undo nohup.
+        if !Self.isIgnored(SIGHUP) { numbers.append(SIGHUP) }
+        for number in numbers {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: queue)
             source.setEventHandler { [self] in finish() }
             source.resume()
             signalSources.append(source)
         }
+    }
+
+    /// Whether this process started with `number` ignored.
+    static func isIgnored(_ number: Int32) -> Bool {
+        var action = sigaction()
+        guard sigaction(number, nil, &action) == 0 else { return false }
+        return unsafeBitCast(action.__sigaction_u.__sa_handler, to: Int.self) == unsafeBitCast(SIG_IGN, to: Int.self)
     }
 
     func schedule() {
