@@ -22,6 +22,11 @@ const (
 	linuxIfacePhysical
 	linuxIfaceWireless
 	linuxIfaceTunnel // listed, but not summed: its traffic also crosses a physical NIC
+	// linuxIfaceVirtual is a software interface that is nobody's port: a
+	// container's veth eth0, which has no device link. It is summed only on
+	// machines with no physical or wireless interface at all (inside Docker,
+	// LXC, a Proxmox CT, nspawn), where it is the machine's network.
+	linuxIfaceVirtual
 )
 
 // linuxFields splits line on spaces and tabs into dst without allocating.
@@ -52,6 +57,7 @@ type linuxIface struct {
 	prevTX       uint64
 	have         bool
 	rx, tx       float64
+	drx, dtx     uint64 // bytes since the previous sample, for the totals
 	seen         bool
 }
 
@@ -79,6 +85,13 @@ func (c *linuxCollector) classifyIface(name string) int {
 		return linuxIfaceWireless
 	}
 	if linuxExists(filepath.Join(dir, "device")) {
+		// A VF enslaved to another NIC (Azure accelerated networking,
+		// net_failover) carries traffic the master's counters already
+		// include. Bridges, bonds and OVS have no device link, so their
+		// ports still count.
+		if linuxExists(filepath.Join(dir, "master", "device")) {
+			return linuxIfaceSkip
+		}
 		return linuxIfacePhysical
 	}
 	for _, p := range []string{"tailscale", "wg", "tun", "zt", "ppp", "nordlynx"} {
@@ -86,7 +99,22 @@ func (c *linuxCollector) classifyIface(name string) int {
 			return linuxIfaceTunnel
 		}
 	}
-	return linuxIfaceSkip
+	// Bridges, their ports (the host side of every veth), interfaces
+	// enslaved to another and those stacked on one (VLANs, macvlans) are
+	// never summed; what is left is a container's own interface.
+	for _, f := range linuxDirNames(dir) {
+		if f == "bridge" || f == "brport" || f == "master" || strings.HasPrefix(f, "lower_") {
+			return linuxIfaceSkip
+		}
+	}
+	return linuxIfaceVirtual
+}
+
+// linuxIfaceCounted reports whether an interface's traffic goes into the
+// machine's totals. hardware says whether the machine has any physical or
+// wireless interface.
+func linuxIfaceCounted(class int, hardware bool) bool {
+	return class == linuxIfacePhysical || class == linuxIfaceWireless || (class == linuxIfaceVirtual && !hardware)
 }
 
 // sampleNetwork reads /proc/net/dev; the per-interface list, speeds and the
@@ -130,29 +158,30 @@ func (c *linuxCollector) sampleNetwork(interval float64, resync, full bool, now 
 			e.class, e.classifiedAt = c.classifyIface(name), now
 		}
 		e.seen = true
-		e.rx, e.tx = 0, 0
+		e.rx, e.tx, e.drx, e.dtx = 0, 0, 0, 0
 		if e.have {
-			if e.class == linuxIfacePhysical || e.class == linuxIfaceWireless {
-				if rx >= e.prevRX {
-					ns.rxTotal += rx - e.prevRX
-				}
-				if tx >= e.prevTX {
-					ns.txTotal += tx - e.prevTX
-				}
-			}
+			e.drx, _ = counterDelta(e.prevRX, rx)
+			e.dtx, _ = counterDelta(e.prevTX, tx)
 			if !resync {
 				e.rx, e.tx = Rate(e.prevRX, rx, interval), Rate(e.prevTX, tx, interval)
 			}
 		}
 		e.prevRX, e.prevTX, e.have = rx, tx, true
-		if e.class == linuxIfacePhysical || e.class == linuxIfaceWireless {
-			out.RX += e.rx
-			out.TX += e.tx
-		}
 	}
+	hardware := false
 	for name, e := range ns.ifaces {
 		if !e.seen {
 			delete(ns.ifaces, name) // veths come and go with containers
+			continue
+		}
+		hardware = hardware || e.class == linuxIfacePhysical || e.class == linuxIfaceWireless
+	}
+	for _, e := range ns.ifaces {
+		if linuxIfaceCounted(e.class, hardware) {
+			ns.rxTotal += e.drx
+			ns.txTotal += e.dtx
+			out.RX += e.rx
+			out.TX += e.tx
 		}
 	}
 	out.RXTotal, out.TXTotal = ns.rxTotal, ns.txTotal
@@ -171,7 +200,7 @@ func (c *linuxCollector) sampleNetwork(interval float64, resync, full bool, now 
 	out.PrimaryInterface, out.LocalAddress = ns.primary, ns.local
 	names := make([]string, 0, len(ns.ifaces))
 	for name, e := range ns.ifaces {
-		if e.class != linuxIfaceSkip {
+		if e.class != linuxIfaceSkip && (e.class != linuxIfaceVirtual || !hardware) {
 			names = append(names, name)
 		}
 	}
@@ -342,12 +371,10 @@ func (c *linuxCollector) sampleDisk(interval float64, resync, full bool, now tim
 			continue
 		}
 		if d.have {
-			if r >= d.prevR {
-				ds.readTotal += (r - d.prevR) * 512
-			}
-			if w >= d.prevW {
-				ds.writeTotal += (w - d.prevW) * 512
-			}
+			dr, _ := counterDelta(d.prevR, r)
+			dw, _ := counterDelta(d.prevW, w)
+			ds.readTotal += dr * 512
+			ds.writeTotal += dw * 512
 			if !resync {
 				out.Read += Rate(d.prevR, r, interval) * 512
 				out.Write += Rate(d.prevW, w, interval) * 512

@@ -732,6 +732,93 @@ func TestLinuxNetwork(t *testing.T) {
 	}
 }
 
+// linuxTNetTree replaces a fixture's /sys/class/net. Each interface lists
+// the entries of its sysfs directory: "device" and the like become
+// directories, "master=br0" a symlink to that interface.
+func linuxTNetTree(t *testing.T, root string, ifaces map[string][]string) {
+	t.Helper()
+	net := filepath.Join(root, "sys/class/net")
+	if err := os.RemoveAll(net); err != nil {
+		t.Fatal(err)
+	}
+	for name, entries := range ifaces {
+		linuxTPut(t, root, "sys/class/net/"+name+"/operstate", "up\n")
+		for _, e := range entries {
+			if target, ok := strings.CutPrefix(e, "master="); ok {
+				if err := os.Symlink(filepath.Join("..", target), filepath.Join(net, name, "master")); err != nil {
+					t.Skipf("no symlinks here: %v", err)
+				}
+				continue
+			}
+			if err := os.MkdirAll(filepath.Join(net, name, e), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestLinuxNetworkContainer(t *testing.T) {
+	// Inside Docker, LXC or nspawn the machine's interface is a veth with no
+	// device link. A Docker-in-Docker bridge, its ports, a VLAN on eth0 and
+	// a tunnel must still not count.
+	c, root := linuxTFixture(t, "linux-vm")
+	linuxTNetTree(t, root, map[string][]string{
+		"lo": nil, "eth0": nil, "docker0": {"bridge"}, "veth9": {"brport"}, "eth0.5": {"lower_eth0"}, "tailscale0": nil,
+	})
+	linuxTPut(t, root, "proc/net/route", "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"+
+		"eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\n")
+	linuxTPut(t, root, "proc/net/dev", linuxTNetdevFile("lo 100 100", "eth0 1000 2000", "docker0 100 100", "veth9 100 100", "eth0.5 100 100", "tailscale0 100 100"))
+	c.Sample(wire.DetailFull)
+	linuxTPut(t, root, "proc/net/dev", linuxTNetdevFile("lo 900 900", "eth0 6000 4000", "docker0 900 900", "veth9 900 900", "eth0.5 900 900", "tailscale0 900 900"))
+	linuxTPause(c, time.Second)
+	s := c.Sample(wire.DetailFull)
+	n := s.Network
+	linuxTNear(t, "container rx", n.RX, 5000/s.Interval, 1e-6)
+	linuxTNear(t, "container tx", n.TX, 2000/s.Interval, 1e-6)
+	if n.RXTotal != 5000 || n.TXTotal != 2000 {
+		t.Errorf("container totals %d %d", n.RXTotal, n.TXTotal)
+	}
+	var names []string
+	for _, i := range n.Interfaces {
+		names = append(names, i.Name)
+	}
+	if got := strings.Join(names, " "); got != "eth0 tailscale0" || n.PrimaryInterface != "eth0" {
+		t.Errorf("container interfaces %q, primary %q", got, n.PrimaryInterface)
+	}
+
+	// A 32-bit counter (32-bit kernels, some Pi NIC drivers) wraps at 4 GiB.
+	linuxTPut(t, root, "proc/net/dev", linuxTNetdevFile("eth0 4294967000 4000"))
+	linuxTPause(c, time.Second)
+	c.Sample(wire.DetailVitals)
+	linuxTPut(t, root, "proc/net/dev", linuxTNetdevFile("eth0 1000 4000"))
+	linuxTPause(c, time.Second)
+	s = c.Sample(wire.DetailVitals)
+	linuxTNear(t, "rx across the wrap", s.Network.RX, 1296/s.Interval, 1e-6)
+	if s.Network.RXTotal != 5000+(4294967000-6000)+1296 {
+		t.Errorf("total across the wrap %d", s.Network.RXTotal)
+	}
+}
+
+func TestLinuxNetworkFailover(t *testing.T) {
+	// Azure accelerated networking: the Mellanox VF is enslaved to the
+	// synthetic NIC, whose counters already include it. A NIC bridged into
+	// br0 still counts: bridges have no device link.
+	c, root := linuxTFixture(t, "linux-vm")
+	linuxTNetTree(t, root, map[string][]string{
+		"lo": nil, "eth0": {"device"}, "enP30832s1": {"device", "master=eth0"},
+		"enp2s0": {"device", "master=br0"}, "br0": {"bridge"},
+	})
+	linuxTPut(t, root, "proc/net/dev", linuxTNetdevFile("eth0 1000 1000", "enP30832s1 1000 1000", "enp2s0 1000 1000", "br0 1000 1000"))
+	c.Sample(wire.DetailVitals)
+	linuxTPut(t, root, "proc/net/dev", linuxTNetdevFile("eth0 3000 1000", "enP30832s1 2900 1000", "enp2s0 1500 1000", "br0 1500 1000"))
+	linuxTPause(c, time.Second)
+	s := c.Sample(wire.DetailVitals)
+	linuxTNear(t, "failover rx", s.Network.RX, 2500/s.Interval, 1e-6)
+	if s.Network.RXTotal != 2500 {
+		t.Errorf("failover total %d: the VF was counted twice", s.Network.RXTotal)
+	}
+}
+
 func TestLinuxDisk(t *testing.T) {
 	c, root := linuxTFixture(t, "linux-amd-desktop")
 	d := c.Sample(wire.DetailFull).Disk

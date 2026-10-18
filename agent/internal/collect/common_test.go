@@ -29,4 +29,25 @@ func TestRank(t *testing.T) {
 	if Rate(10, 5, 1) != 0 || Rate(5, 15, 2) != 5 {
 		t.Errorf("Rate wrong")
 	}
+	// A 32-bit counter that wrapped is followed across the wrap; a 64-bit
+	// one, or one that fell back further than half the 32-bit range, was
+	// reset and reports nothing.
+	for _, tc := range []struct {
+		prev, cur, want uint64
+		ok              bool
+	}{
+		{1<<32 - 100, 50, 150, true},
+		{1<<32 - 1, 0, 1, true},
+		{3_000_000_000, 100, 1<<32 - 3_000_000_000 + 100, true},
+		{1_000_000_000, 5, 0, false},
+		{5_000_000_000, 10, 0, false},
+		{7, 7, 0, true},
+	} {
+		if d, ok := counterDelta(tc.prev, tc.cur); d != tc.want || ok != tc.ok {
+			t.Errorf("counterDelta(%d, %d) = %d %v, want %d %v", tc.prev, tc.cur, d, ok, tc.want, tc.ok)
+		}
+	}
+	if Rate(1<<32-100, 50, 2) != 75 {
+		t.Errorf("Rate across a 32-bit wrap = %v", Rate(1<<32-100, 50, 2))
+	}
 }

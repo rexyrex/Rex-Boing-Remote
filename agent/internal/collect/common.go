@@ -93,11 +93,30 @@ func Rank(all []wire.ProcessRow, metrics ...string) (rows []wire.ProcessRow, ran
 }
 
 // Rate returns a non-negative per-second rate from two counter readings. A
-// counter that went backwards (reset, wrap, device replaced) yields 0 rather
-// than a huge number.
+// counter that went backwards (reset, device replaced) yields 0 rather than
+// a huge number; one that wrapped at 32 bits is followed across the wrap.
 func Rate(previous, current uint64, seconds float64) float64 {
-	if seconds <= 0 || current < previous {
+	d, ok := counterDelta(previous, current)
+	if seconds <= 0 || !ok {
 		return 0
 	}
-	return float64(current-previous) / seconds
+	return float64(d) / seconds
+}
+
+// counterDelta returns how far a counter advanced between two readings. 32-bit
+// kernels keep most /proc counters (interface bytes, disk sectors) in an
+// unsigned long, as do some NIC drivers on any kernel, so they wrap at 4 GiB:
+// a reading below a previous one under 2^32 is a wrap when the distance
+// across it is under 2^31. Anything else that went backwards was reset and
+// reports no progress (ok false).
+func counterDelta(previous, current uint64) (delta uint64, ok bool) {
+	if current >= previous {
+		return current - previous, true
+	}
+	if previous < 1<<32 {
+		if d := 1<<32 - previous + current; d < 1<<31 {
+			return d, true
+		}
+	}
+	return 0, false
 }
