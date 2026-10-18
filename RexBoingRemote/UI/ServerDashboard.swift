@@ -142,6 +142,7 @@ struct ServerDashboard: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help("Settings")
+            .accessibilityLabel("Settings")
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)

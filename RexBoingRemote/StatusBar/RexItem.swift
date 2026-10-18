@@ -29,8 +29,13 @@ final class RexItem: NSObject {
     var isAsleep = false { didSet { if oldValue != isAsleep { refreshReadout(); retune() } } }
     var animate = true { didSet { retune() } }
     var readout: ReadoutCell? { didSet { if oldValue != readout { refreshReadout() } } }
+    /// Also what VoiceOver reads for the item, which has no text of its
+    /// own: the server's name and how it is.
     var toolTip: String? {
-        didSet { statusItem.button?.toolTip = toolTip }
+        didSet {
+            statusItem.button?.toolTip = toolTip
+            statusItem.button?.setAccessibilityLabel(toolTip)
+        }
     }
 
     private let canvas = VisualCanvas()
