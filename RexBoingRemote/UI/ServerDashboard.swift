@@ -166,7 +166,7 @@ struct ServerDashboard: View {
         switch connection.state {
         case .connecting: return "Connecting to \(server.name)…"
         case .waiting(_, let reason): return reason
-        case .attention(let issue): return issue.explanation
+        case .attention(let issue): return issue.explanation(for: server)
         case .idle: return "Paused."
         case .live: return "Taking the first sample…"
         }
@@ -246,7 +246,7 @@ struct ConnectionBanner: View {
         case .waiting(let until, _):
             text = "Retrying in \(max(0, Int(until.timeIntervalSince(now).rounded()))) s."
         case .attention(let issue):
-            text = issue.explanation
+            text = issue.explanation(for: connection.server)
         case .connecting:
             text = "Connecting…"
         default:

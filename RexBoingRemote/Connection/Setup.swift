@@ -122,7 +122,7 @@ final class Setup: ObservableObject {
                 throw Failure(message: "This server's processor (\(parts[1])) isn't supported yet.")
             }
             arch = normalised
-        } else if let failure = Self.connectionFailure(unix) {
+        } else if let failure = Self.connectionFailure(unix, command: Self.sshCommand(destination, port: port)) {
             throw failure
         } else {
             // Not a Unix shell. Ask cmd, which every Windows has, whatever the
@@ -131,7 +131,7 @@ final class Setup: ObservableObject {
                 target, control: control, ["cmd", "/c", "\"ver & echo %PROCESSOR_ARCHITECTURE%\""], timeout: 60)
             step = .checking
             guard windows.status == 0, windows.stdout.lowercased().contains("windows") else {
-                throw Self.connectionFailure(windows) ?? Failure(
+                throw Self.connectionFailure(windows, command: Self.sshCommand(destination, port: port)) ?? Failure(
                     message: "Couldn't tell what system the server runs.",
                     detail: (unix.stderr + windows.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
             }
@@ -368,8 +368,14 @@ final class Setup: ObservableObject {
         return false
     }
 
+    /// What to try in Terminal for a destination.
+    static func sshCommand(_ destination: String, port: Int?) -> String {
+        "ssh " + (port.map { "-p \($0) " } ?? "") + destination
+    }
+
     /// A failure to reach or log in to the server at all, worded for people.
-    static func connectionFailure(_ result: Run.Result) -> Failure? {
+    /// `command` is what to try in Terminal.
+    static func connectionFailure(_ result: Run.Result, command: String) -> Failure? {
         let text = result.stderr.lowercased()
         if result.status == -2 { return Failure(message: "The server didn't answer in time.") }
         if text.contains("could not resolve hostname") {
@@ -384,7 +390,7 @@ final class Setup: ObservableObject {
         }
         if text.contains("permission denied") {
             return Failure(message: "The server didn't accept your login.",
-                           detail: "Rex Boing Remote uses your SSH setup for this one step. Check that `ssh \(result.stderr.isEmpty ? "server" : "…")` works in Terminal, or use the install command instead.")
+                           detail: "Rex Boing Remote uses your SSH setup for this one step. Check that `\(command)` works in Terminal, or use the install command instead.")
         }
         if text.contains("host key verification failed") {
             return Failure(message: "The server's identity wasn't confirmed, so nothing was changed.")

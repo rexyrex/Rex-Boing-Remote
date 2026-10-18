@@ -43,7 +43,13 @@ final class ServerConnection: ObservableObject, Identifiable {
             }
         }
 
-        var explanation: String {
+        /// What happened and what to do about it on this server. One added
+        /// by pairing code has no Repair, since the app never had SSH access
+        /// of its own to it: the fix there is the install command again.
+        func explanation(for server: Server) -> String {
+            let reinstall = "Run the install command on the server again (Add Server › Set it up from the server) "
+                + "and paste the code it prints."
+            let byCode = server.hostKeyAlias != nil
             switch self {
             case .hostKeyChanged:
                 return "Its SSH host key no longer matches the one saved when it was added. "
@@ -51,14 +57,15 @@ final class ServerConnection: ObservableObject, Identifiable {
                     + "so Rex Boing Remote stopped. If you expected it, remove the server and add it again."
             case .authenticationFailed(let detail):
                 return "The key may have been removed from the server's authorized_keys. "
-                    + "Repair reinstalls it. \(detail)"
+                    + (byCode ? reinstall : "Repair reinstalls it.") + " \(detail)"
             case .agentMissing:
-                return "The agent's file was removed or moved. Repair copies it back."
+                return "The agent's file was removed or moved. " + (byCode ? reinstall : "Repair copies it back.")
             case .localNetworkDenied:
                 return "macOS is blocking connections to your local network. Turn on Rex Boing Remote in "
                     + "System Settings › Privacy & Security › Local Network."
             case .incompatibleAgent(let version):
-                return "The agent on the server (\(version)) speaks an older protocol. Repair updates it."
+                return "The agent on the server (\(version)) speaks an older protocol. "
+                    + (byCode ? "Update Agent in Settings replaces it. Or: " + reinstall : "Repair updates it.")
             }
         }
 
