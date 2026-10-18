@@ -46,7 +46,10 @@ type pipeListener struct {
 	sa   *windows.SecurityAttributes
 	stop windows.Handle // event, set by Close
 
-	mu     sync.Mutex
+	mu sync.Mutex
+	// next is the instance waiting to be taken by Accept. Accept takes it
+	// (setting next to 0) before it waits on it, so Close only ever closes
+	// an instance no one is using, and no handle is closed twice.
 	next   windows.Handle
 	closed bool
 }
@@ -104,19 +107,20 @@ func (l *pipeListener) Accept() (conn, error) {
 			return nil, errClosed
 		}
 		h := l.next
+		l.next = 0
 		if h == 0 {
 			var err error
 			if h, err = createInstance(l.name, l.sa, false); err != nil {
 				l.mu.Unlock()
 				return nil, err
 			}
-			l.next = h
 		}
 		l.mu.Unlock()
 
+		// Close interrupts the wait through the stop event; h stays this
+		// loop's to close.
 		err := l.connect(h)
 		l.mu.Lock()
-		l.next = 0
 		if l.closed {
 			l.mu.Unlock()
 			windows.CloseHandle(h)
@@ -173,6 +177,7 @@ func (l *pipeListener) Close() error {
 	}
 	l.closed = true
 	windows.SetEvent(l.stop)
+	// Only an instance Accept has not taken: one it waits on, it closes.
 	if l.next != 0 {
 		windows.CloseHandle(l.next)
 		l.next = 0
