@@ -595,6 +595,242 @@ func TestLinuxStorageSensorCadence(t *testing.T) {
 	}
 }
 
+// linuxTSensor returns the discovered sensor with the given key.
+func linuxTSensor(t *testing.T, c *linuxCollector, key string) *linuxTempSensor {
+	t.Helper()
+	for _, s := range c.thermal.sensors {
+		if s.key == key {
+			return s
+		}
+	}
+	t.Fatalf("no sensor %q", key)
+	return nil
+}
+
+func linuxTHasSensor(th *wire.Thermal, key string) bool {
+	for _, s := range th.Sensors {
+		if s.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func TestLinuxSlowReads(t *testing.T) {
+	slow, fast := 2*linuxSlowRead, linuxSlowRead/2
+	cases := []struct {
+		reads []time.Duration
+		every time.Duration // cadence after them
+	}{
+		{[]time.Duration{slow}, 0},
+		{[]time.Duration{slow, slow}, 0},
+		{[]time.Duration{slow, slow, slow}, linuxSlowEvery},
+		{[]time.Duration{slow, slow, slow, slow, slow}, linuxSlowEvery},
+		{[]time.Duration{slow, slow, fast, slow, slow}, 0},
+		{[]time.Duration{slow, slow, slow, fast}, 0}, // re-tested while demoted, and fast again
+		{[]time.Duration{slow, slow, slow, fast, slow}, 0},
+	}
+	for i, tc := range cases {
+		s := &linuxTempSensor{}
+		for _, d := range tc.reads {
+			s.slowReads = linuxNextSlowReads(s.slowReads, d)
+		}
+		if got := s.cadence(); got != tc.every {
+			t.Errorf("case %d: cadence %v after %v, want %v", i, got, tc.reads, tc.every)
+		}
+	}
+	// A drive's own slower pace is kept.
+	if s := (&linuxTempSensor{every: linuxSATAEvery, slowReads: linuxSlowAfter}); s.cadence() != linuxSATAEvery {
+		t.Errorf("demoted drivetemp cadence %v", s.cadence())
+	}
+}
+
+func TestLinuxSlowSensorDemotion(t *testing.T) {
+	c, root := linuxTFixture(t, "linux-intel-hybrid")
+	pkg := filepath.Join(root, "sys/class/hwmon/hwmon3/temp1_input")
+	var mu sync.Mutex
+	slow := true
+	c.readTemp = func(path string) (int64, bool) {
+		mu.Lock()
+		s := slow && path == pkg
+		mu.Unlock()
+		if s {
+			time.Sleep(2 * linuxSlowRead)
+		}
+		return linuxReadInt(path)
+	}
+	setPkg := func(milli string) { linuxTPut(t, root, "sys/class/hwmon/hwmon3/temp1_input", milli+"\n") }
+	cpu := func() float64 { return linuxTF64(c.Sample(wire.DetailVitals).Thermal.CPUCelsius) }
+
+	// One slow read under load does not demote the CPU package.
+	cpu()
+	setPkg("70000")
+	if got := cpu(); got != 70 {
+		t.Fatalf("package after one slow read = %v, want it read every sample", got)
+	}
+	cpu() // the third slow read in a row
+	setPkg("75000")
+	if got := cpu(); got != 70 {
+		t.Errorf("package after three slow reads = %v, want the last value repeated", got)
+	}
+	// Re-tested on the slow cadence; a fast read restores it.
+	mu.Lock()
+	slow = false
+	mu.Unlock()
+	linuxTSensor(t, c, "pkg").readAt = time.Now().Add(-linuxSlowEvery)
+	if got := cpu(); got != 75 {
+		t.Errorf("demoted package not re-read after %v: %v", linuxSlowEvery, got)
+	}
+	setPkg("80000")
+	if got := cpu(); got != 80 {
+		t.Errorf("package not restored after a fast read: %v", got)
+	}
+	// Rediscovery keeps nothing of the old demotion.
+	c.rediscoverNext()
+	setPkg("81000")
+	if got := cpu(); got != 81 || linuxTSensor(t, c, "pkg").cadence() != 0 {
+		t.Errorf("after rediscovery: %v, cadence %v", got, linuxTSensor(t, c, "pkg").cadence())
+	}
+}
+
+func TestLinuxHungDriveSensor(t *testing.T) {
+	c, root := linuxTFixture(t, "linux-intel-hybrid")
+	nvme := filepath.Join(root, "sys/class/hwmon/hwmon2") + string(filepath.Separator)
+	var mu sync.Mutex
+	block := false
+	reads := map[string]int{}
+	release := make(chan struct{})
+	c.readTemp = func(path string) (int64, bool) {
+		mu.Lock()
+		hang := block && strings.HasPrefix(path, nvme)
+		if hang {
+			reads[path]++
+		}
+		mu.Unlock()
+		if hang {
+			<-release // a dying drive
+		}
+		return linuxReadInt(path)
+	}
+	if got := linuxTF64(c.Sample(wire.DetailFull).Thermal.StorageCelsius); got != 38.9 {
+		t.Fatalf("storage %v", got)
+	}
+	mu.Lock()
+	block = true
+	mu.Unlock()
+	due := func() {
+		for _, s := range c.thermal.sensors {
+			s.readAt = s.readAt.Add(-linuxSlowEvery)
+		}
+	}
+	due()
+	start := time.Now()
+	th := c.Sample(wire.DetailFull).Thermal
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("a hung drive held the sample for %v", d)
+	}
+	if linuxTF64(th.StorageCelsius) != 38.9 || linuxTF64(th.CPUCelsius) != 61 {
+		t.Errorf("while the drive hangs: storage %v cpu %v, want the last value and a live CPU", linuxTF64(th.StorageCelsius), linuxTF64(th.CPUCelsius))
+	}
+	due()
+	c.Sample(wire.DetailFull)
+	mu.Lock()
+	if len(reads) != 2 || reads[nvme+"temp1_input"] != 1 || reads[nvme+"temp2_input"] != 1 {
+		t.Errorf("reads of a hung drive %v, want one per sensor", reads)
+	}
+	mu.Unlock()
+
+	// Unanswered for a minute: the value is no longer shown.
+	for _, s := range c.thermal.sensors {
+		if s.async != nil {
+			s.async.mu.Lock()
+			s.async.since = s.async.since.Add(-linuxSensorHung)
+			s.async.mu.Unlock()
+		}
+	}
+	if th := c.Sample(wire.DetailFull).Thermal; th.StorageCelsius != nil || linuxTHasSensor(th, "nvme0") {
+		t.Errorf("a drive hung for %v still reports %v", linuxSensorHung, linuxTF64(th.StorageCelsius))
+	}
+	linuxTPut(t, root, "sys/class/hwmon/hwmon2/temp1_input", "41000\n")
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for linuxTF64(c.Sample(wire.DetailFull).Thermal.StorageCelsius) != 41 {
+		if time.Now().After(deadline) {
+			t.Fatal("the drive's temperature never came back")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestLinuxDriveTempFullOnly(t *testing.T) {
+	c, root := linuxTFixture(t, "linux-amd-desktop")
+	sata := filepath.Join(root, "sys/class/hwmon/hwmon6/temp1_input")
+	linuxTPut(t, root, "sys/class/hwmon/hwmon6/temp1_input", "60000\n")
+	var mu sync.Mutex
+	reads := 0
+	c.readTemp = func(path string) (int64, bool) {
+		if path == sata {
+			mu.Lock()
+			reads++
+			mu.Unlock()
+		}
+		return linuxReadInt(path)
+	}
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return reads
+	}
+	// Vitals (the menu bar, background history) never touch the SATA
+	// drive, so it can spin down.
+	for i := 0; i < 2; i++ {
+		if th := c.Sample(wire.DetailVitals).Thermal; linuxTF64(th.StorageCelsius) != 51.9 || count() != 0 {
+			t.Fatalf("vitals storage %v after %d drivetemp reads", linuxTF64(th.StorageCelsius), count())
+		}
+	}
+	th := c.Sample(wire.DetailFull).Thermal
+	if linuxTF64(th.StorageCelsius) != 60 || !linuxTHasSensor(th, "sda") || count() != 1 {
+		t.Errorf("full storage %v, %d reads", linuxTF64(th.StorageCelsius), count())
+	}
+	// Back to vitals: the dashboard's reading is not carried along.
+	if th := c.Sample(wire.DetailVitals).Thermal; linuxTF64(th.StorageCelsius) != 51.9 || count() != 1 {
+		t.Errorf("vitals after full: storage %v, %d reads", linuxTF64(th.StorageCelsius), count())
+	}
+}
+
+func TestLinuxThermalZoneChips(t *testing.T) {
+	// An RK3588 on a mainline kernel: every thermal zone has an hwmon
+	// device named after it.
+	root := t.TempDir()
+	chips := []struct{ name, milli string }{
+		{"soc_thermal", "45000"}, {"bigcore0_thermal", "47100"}, {"bigcore2_thermal", "48200"},
+		{"littlecore_thermal", "46000"}, {"center_thermal", "44000"}, {"gpu_thermal", "43500"}, {"npu_thermal", "49900"},
+	}
+	for i, ch := range chips {
+		dir := fmt.Sprintf("sys/class/hwmon/hwmon%d/", i)
+		linuxTPut(t, root, dir+"name", ch.name+"\n")
+		linuxTPut(t, root, dir+"temp1_input", ch.milli+"\n")
+	}
+	c := newLinuxCollector(root)
+	th := c.Sample(wire.DetailFull).Thermal
+	labels := map[string]string{}
+	for _, s := range th.Sensors {
+		labels[s.Key] = s.Label + "/" + s.Category
+	}
+	for k, want := range map[string]string{"bigcore0": "CPU bigcore0/CPU", "bigcore2": "CPU bigcore2/CPU", "littleco": "CPU littlecore/CPU",
+		"gpu": "GPU/GPU", "soc": "SoC/SoC", "centerth": "center_thermal 1/Other", "nputherm": "npu_thermal 1/Other"} {
+		if labels[k] != want {
+			t.Errorf("%s = %q, want %q (all: %v)", k, labels[k], want, labels)
+		}
+	}
+	if linuxTF64(th.CPUCelsius) != 48.2 || linuxTF64(th.GPUCelsius) != 43.5 || linuxTF64(th.SoCCelsius) != 45 || linuxTF64(th.PeakCelsius) != 48.2 {
+		t.Errorf("headlines cpu %v gpu %v soc %v peak %v", linuxTF64(th.CPUCelsius), linuxTF64(th.GPUCelsius), linuxTF64(th.SoCCelsius), linuxTF64(th.PeakCelsius))
+	}
+	if v := c.Sample(wire.DetailVitals).Thermal; linuxTF64(v.CPUCelsius) != 48.2 || linuxTF64(v.GPUCelsius) != 43.5 {
+		t.Errorf("vitals headlines %+v", v)
+	}
+}
+
 func TestLinuxRAPL(t *testing.T) {
 	linuxTNeedColons(t)
 	c, root := linuxTFixture(t, "linux-intel-hybrid")

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
@@ -19,9 +20,13 @@ const (
 	// linuxRediscover is how often sensor, battery and RAPL paths are
 	// listed again (modules load, USB drives come and go).
 	linuxRediscover = 60 * time.Second
-	// linuxSlowRead marks a sensor slow: some drivers (dell_smm, i2c chips)
+	// linuxSlowRead marks a read slow: some drivers (dell_smm, i2c chips)
 	// take milliseconds per read, and a read blocks the sample.
 	linuxSlowRead = 5 * time.Millisecond
+	// linuxSlowAfter is how many slow reads in a row demote a sensor to
+	// linuxSlowEvery. One slow read on a loaded machine says little, and a
+	// CPU package sensor demoted by it would update every 10 s for good.
+	linuxSlowAfter = 3
 	// linuxSlowEvery is how often slow sensors and drive temperatures are
 	// read; their last value is repeated in between. An NVMe temperature is
 	// an admin command to the drive (about 10 ms on a typical SSD), and
@@ -30,6 +35,14 @@ const (
 	// linuxSATAEvery spaces out drivetemp reads further: each is a SMART
 	// command to a SATA drive.
 	linuxSATAEvery = 30 * time.Second
+	// linuxSensorWait is how long a sample waits for the sensors it reads
+	// off the sampling goroutine (drives, demoted sensors). A healthy NVMe
+	// drive answers in about 10 ms; a dying disk or a hung controller can
+	// take seconds, and the sample goes on with the last value.
+	linuxSensorWait = 100 * time.Millisecond
+	// linuxSensorHung is how long a read may stay unanswered before the
+	// sensor's last value is no longer shown.
+	linuxSensorHung = 60 * time.Second
 )
 
 // linuxTempSensor is one temperature input.
@@ -43,10 +56,85 @@ type linuxTempSensor struct {
 	crit     *float64
 	pm       string        // runtime_status of the owning device (GPUs), "" when none
 	every    time.Duration // read at most this often; 0 means every sample
+	fullOnly bool          // read only for full samples (an open dashboard)
 
-	value  float64
-	valid  bool
-	readAt time.Time
+	value     float64
+	valid     bool
+	readAt    time.Time
+	slowReads int              // slow reads in a row, up to linuxSlowAfter
+	async     *linuxSensorRead // set once the sensor is read off the sampling goroutine
+}
+
+// linuxSensorRead is a temperature read running off the sampling goroutine,
+// and its result until a sample takes it. At most one runs per sensor, so a
+// hung drive costs one stuck goroutine, never one per sample.
+type linuxSensorRead struct {
+	mu      sync.Mutex
+	pending bool
+	since   time.Time // when the pending read started
+	done    bool      // a result is waiting
+	value   int64
+	ok      bool
+	took    time.Duration
+}
+
+// linuxNextSlowReads counts a read that took took into a run of slow reads:
+// a fast read ends the run (and restores a demoted sensor).
+func linuxNextSlowReads(slowReads int, took time.Duration) int {
+	if took <= linuxSlowRead {
+		return 0
+	}
+	return min(slowReads+1, linuxSlowAfter)
+}
+
+// cadence is how often the sensor is read: its own pace, or linuxSlowEvery
+// after linuxSlowAfter slow reads in a row. A demoted sensor is still read on
+// that cadence, so its first fast read brings it back.
+func (s *linuxTempSensor) cadence() time.Duration {
+	if s.slowReads >= linuxSlowAfter && s.every < linuxSlowEvery {
+		return linuxSlowEvery
+	}
+	return s.every
+}
+
+// collectAsync takes the result of a read that finished since the last
+// sample, and drops the value of one that has hung. It reports whether a read
+// is still running.
+func (s *linuxTempSensor) collectAsync(now time.Time) (pending bool) {
+	r := s.async
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.done {
+		r.done = false
+		s.slowReads = linuxNextSlowReads(s.slowReads, r.took)
+		s.value = float64(r.value) / 1000
+		s.valid = r.ok && linuxPlausibleTemp(s.value)
+	}
+	if r.pending && now.Sub(r.since) > linuxSensorHung {
+		s.valid = false
+	}
+	return r.pending
+}
+
+// start runs one read in the background; done closes when it returns.
+func (r *linuxSensorRead) start(path string, read func(string) (int64, bool), now time.Time) (done <-chan struct{}) {
+	ch := make(chan struct{})
+	r.mu.Lock()
+	r.pending, r.since = true, now
+	r.mu.Unlock()
+	go func() {
+		t := time.Now()
+		v, ok := read(path)
+		took := time.Since(t)
+		r.mu.Lock()
+		r.value, r.ok, r.took, r.done, r.pending = v, ok, took, true, false
+		r.mu.Unlock()
+		close(ch)
+	}()
+	return ch
 }
 
 // linuxFan is one fan tachometer.
@@ -88,6 +176,11 @@ func linuxChipCategory(name string) string {
 		return "Battery"
 	case name == "jc42" || name == "spd5118":
 		return "Memory"
+	case strings.HasSuffix(name, "_thermal"):
+		// The thermal core names each zone's hwmon device after the zone
+		// ("bigcore0_thermal", "gpu_thermal" on an RK3588).
+		_, _, category, _ := linuxZoneName(name)
+		return category
 	}
 	return "Other"
 }
@@ -216,15 +309,16 @@ func (c *linuxCollector) discoverThermal(now time.Time) {
 			s.high, s.crit = linuxLimit(base+"_max"), linuxLimit(base+"_crit")
 			switch {
 			case ch.name == "drivetemp":
-				s.every = linuxSATAEvery
+				// A SMART command can restart a SATA drive's spin-down
+				// timer, so a NAS's disks would never sleep: their
+				// temperatures are read only while a dashboard is open.
+				s.every, s.fullOnly = linuxSATAEvery, true
 			case category == "Storage":
 				s.every = linuxSlowEvery
 			}
 			if prev, ok := old[s.path]; ok {
 				s.value, s.valid, s.readAt = prev.value, prev.valid, prev.readAt
-				if prev.every > s.every {
-					s.every = prev.every
-				}
+				s.slowReads, s.async = prev.slowReads, prev.async
 			}
 			chipSensors = append(chipSensors, s)
 		}
@@ -407,6 +501,12 @@ func linuxSensorName(chip string, k int, label, devName string, ordinal int, mul
 		return "pch", "PCH", false
 	case strings.HasPrefix(chip, "iwlwifi"):
 		return "wifi", "Wi-Fi", false
+	case strings.HasSuffix(chip, "_thermal") && linuxChipCategory(chip) != "Other":
+		key, full, _, headline := linuxZoneName(chip)
+		if k > 1 {
+			return linuxShortKey(key + idx), full + " " + idx, headline
+		}
+		return key, full, headline
 	case linuxChipCategory(chip) == "Battery":
 		return "bat", "Battery", true
 	}
@@ -496,7 +596,8 @@ func (c *linuxCollector) discoverThermalZones(old map[string]*linuxTempSensor) [
 			}
 		}
 		if prev, ok := old[s.path]; ok {
-			s.every, s.value, s.valid, s.readAt = prev.every, prev.value, prev.valid, prev.readAt
+			s.value, s.valid, s.readAt = prev.value, prev.valid, prev.readAt
+			s.slowReads, s.async = prev.slowReads, prev.async
 		}
 		out = append(out, s)
 	}
@@ -534,7 +635,8 @@ func linuxZoneName(typ string) (key, label, category string, headline bool) {
 }
 
 // sampleThermal reads the sensors: all of them in full mode, only the
-// headline ones in vitals mode. gpus supplies NVIDIA and AMD readings.
+// headline ones in vitals mode, SATA drives excepted. gpus supplies NVIDIA
+// and AMD readings.
 func (c *linuxCollector) sampleThermal(full bool, gpus []wire.GPU, now time.Time) *wire.Thermal {
 	ts := &c.thermal
 	pmState := map[string]bool{} // runtime_status path → suspended, read once per sample
@@ -550,25 +652,59 @@ func (c *linuxCollector) sampleThermal(full bool, gpus []wire.GPU, now time.Time
 		return pmState[path]
 	}
 
+	read := c.readTemp
+	if read == nil {
+		read = linuxReadInt
+	}
+	var waits []<-chan struct{}
+	var started []*linuxTempSensor
 	for _, s := range ts.sensors {
-		if !full && !s.headline {
+		if !full && (!s.headline || s.fullOnly) {
 			continue
 		}
 		if suspended(s.pm) {
 			s.valid = false
 			continue
 		}
-		if s.every > 0 && !s.readAt.IsZero() && now.Sub(s.readAt) < s.every {
+		pending := s.collectAsync(now)
+		if every := s.cadence(); every > 0 && !s.readAt.IsZero() && now.Sub(s.readAt) < every {
 			continue // repeat the last value
 		}
-		start := time.Now()
-		v, ok := linuxReadInt(s.path)
-		if time.Since(start) > linuxSlowRead && s.every < linuxSlowEvery {
-			s.every = linuxSlowEvery
+		if pending {
+			continue // the last read has not returned yet
 		}
+		if s.category == "Storage" || s.slowReads >= linuxSlowAfter {
+			// A drive temperature is a command to the drive, and a slow
+			// sensor is slow: neither may hold up the sample.
+			if s.async == nil {
+				s.async = &linuxSensorRead{}
+			}
+			waits = append(waits, s.async.start(s.path, read, now))
+			started = append(started, s)
+			s.readAt = now
+			continue
+		}
+		start := time.Now()
+		v, ok := read(s.path)
+		s.slowReads = linuxNextSlowReads(s.slowReads, time.Since(start))
 		s.readAt = now
 		s.value = float64(v) / 1000
 		s.valid = ok && linuxPlausibleTemp(s.value)
+	}
+	if len(waits) > 0 {
+		timer := time.NewTimer(linuxSensorWait)
+	wait:
+		for _, done := range waits {
+			select {
+			case <-done:
+			case <-timer.C:
+				break wait
+			}
+		}
+		timer.Stop()
+		for _, s := range started {
+			s.collectAsync(now)
+		}
 	}
 
 	out := &wire.Thermal{}
@@ -576,7 +712,7 @@ func (c *linuxCollector) sampleThermal(full bool, gpus []wire.GPU, now time.Time
 	var peak float64
 	havePeak := false
 	for _, s := range ts.sensors {
-		if !s.valid || (!full && !s.headline) {
+		if !s.valid || (!full && (!s.headline || s.fullOnly)) {
 			continue
 		}
 		v := float64(int(s.value*10+0.5)) / 10

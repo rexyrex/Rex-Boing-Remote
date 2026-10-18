@@ -28,6 +28,9 @@ type linuxCollector struct {
 	lookupUser  func(uid string) string
 	failedUnits func(ctx context.Context) ([]string, error)
 	nvidia      linuxNVIDIA
+	// readTemp, when set, reads temperature inputs instead of linuxReadInt
+	// (tests make it slow or hang).
+	readTemp func(path string) (int64, bool)
 
 	window Window
 	buf    []byte // scratch for the per-sample /proc reads
