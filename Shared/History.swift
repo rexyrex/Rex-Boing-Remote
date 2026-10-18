@@ -313,7 +313,13 @@ struct HistoryRings: Sendable {
     private static func fold(_ point: HistoryPoint, into tier: inout HistoryTier, bucket: inout Bucket) {
         let end = bucketEnd(point.t, step: tier.step)
         if bucket.end != 0, bucket.end != end {
-            tier.append(bucket.point)
+            // A window that ends at or before the tier's newest point is
+            // already covered: an agent's record, merged in since the window
+            // opened (the app's last window before it went away). Appending
+            // it would cut away everything after it, since append keeps the
+            // tier in time order by truncating, so it is dropped instead.
+            // Samples arriving in order never take this path.
+            if bucket.end > (tier.points.last?.t ?? .min) { tier.append(bucket.point) }
             bucket = Bucket()
         }
         bucket.end = end

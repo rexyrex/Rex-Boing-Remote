@@ -350,6 +350,30 @@ struct ConnectionCheck {
             let ordered = zip(app.fine.points, app.fine.points.dropFirst()).allSatisfy { $0.t < $1.t }
             check(low == 51 && app.fine.points.count == 99 + 51 + 100 && ordered,
                   "a background agent's points replace the app's where they overlap (\(low) of \(app.fine.points.count))")
+
+            // The half-minute and five minutes the app had open when it went
+            // away must not cut the agent's record short when they close.
+            var resumed = HistoryRings(interval: 2, started: base)
+            for i in 0...5 {
+                var point = HistoryPoint(t: Int64(base.timeIntervalSince1970 * 1000) + Int64(i) * 2000)
+                point[.cpu] = 0.9
+                resumed.add(point)
+            }
+            var kept = HistoryRings(interval: 2, started: base)
+            for i in 0...3600 {
+                var point = HistoryPoint(t: Int64(base.timeIntervalSince1970 * 1000) + Int64(i) * 2000)
+                point[.cpu] = 0.2
+                kept.add(point)
+            }
+            resumed.merge(kept.wire(), now: base.addingTimeInterval(7200))
+            let merged = (resumed.medium.points.count, resumed.coarse.points.count)
+            var next = HistoryPoint(t: Int64(base.timeIntervalSince1970 * 1000) + 7_201_000)
+            next[.cpu] = 0.5
+            resumed.add(next)
+            check(merged.0 >= 239 && resumed.medium.points.count == merged.0 && resumed.coarse.points.count == merged.1
+                  && resumed.medium.points.last?.t == kept.medium.points.last?.t,
+                  "the first sample after an agent's record keeps all of it (\(resumed.medium.points.count) of \(merged.0) half-minutes, "
+                  + "\(resumed.coarse.points.count) of \(merged.1) five-minute points)")
         } else {
             check(false, "agent/internal/history/testdata/history.json is readable")
         }
@@ -384,6 +408,23 @@ struct ConnectionCheck {
 
         (connection, states) = run("steady", seconds: 5) { c, _ in c.snapshot != nil }
         check(connection.background == .absent, "an agent without history is marked as such")
+        connection.stop()
+
+        // Two hours away, with the background agent keeping them: the
+        // record survives the first live sample after it.
+        var awayRings = HistoryRings(interval: 2, started: Date().addingTimeInterval(-7200))
+        for i in stride(from: 3599, through: 1, by: -1) {
+            var point = HistoryPoint(t: nowMS - Int64(i) * 2000)
+            point[.cpu] = 0.3
+            awayRings.add(point)
+        }
+        try? awayRings.encoded().write(to: historyFile)
+        (connection, states) = run("history-after-drop", seconds: 15) { c, seen in
+            seen.contains("waiting") && seen.last == "live"
+        }
+        check(connection.rings.medium.points.count >= 200 && connection.rings.coarse.points.count >= 20,
+              "a reconnect after time away keeps the agent's record (\(connection.rings.medium.points.count) half-minutes, "
+              + "\(connection.rings.coarse.points.count) five-minute points; \(states.joined(separator: " → ")))")
         connection.stop()
         try? FileManager.default.removeItem(at: historyFile)
 

@@ -16,8 +16,9 @@ n=$(( $(cat "$FAKE_SSH_COUNTER" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$FAKE_SSH_COUNTER"
 
 hello='{"type":"hello","protocol":1,"agent":{"name":"rex-boing-agent","version":"0.1.0","os":"linux","arch":"amd64"},"host":{"hostname":"fake","logicalCores":2},"capabilities":["cpu"],"interval":1}'
+# sample SEQ [T]: T in milliseconds, now if not given.
 sample() {
-    printf '{"type":"sample","seq":%d,"t":%d,"interval":1,"detail":"vitals","resync":false,"cpu":{"total":0.5,"user":0.3,"system":0.2,"idle":0.5,"nice":0},"memory":{"total":100,"used":50}}\n' "$1" "$(( $(date +%s) * 1000 ))"
+    printf '{"type":"sample","seq":%d,"t":%d,"interval":1,"detail":"vitals","resync":false,"cpu":{"total":0.5,"user":0.3,"system":0.2,"idle":0.5,"nice":0},"memory":{"total":100,"used":50}}\n' "$1" "${2:-$(( $(date +%s) * 1000 ))}"
 }
 stream() {
     echo "$hello"
@@ -30,6 +31,20 @@ case "$FAKE_SSH_SCENARIO" in
     history)
         # An agent with a background agent behind it: the history line
         # comes between the hello and the first sample.
+        echo "$hello"
+        cat "$FAKE_SSH_HISTORY"
+        echo
+        for i in $(seq 1 1000); do sample "$i"; sleep 0.3; done ;;
+    history-after-drop)
+        # The app saw a few samples two hours ago, then went away; when it
+        # comes back, the background agent has kept the time between.
+        if [ "$n" -eq 1 ]; then
+            echo "$hello"
+            then=$(( ($(date +%s) - 7200) * 1000 ))
+            for i in 1 2 3 4; do sample "$i" $(( then + i * 2000 )); sleep 0.1; done
+            echo "Connection to fake closed by remote host." >&2
+            exit 255
+        fi
         echo "$hello"
         cat "$FAKE_SSH_HISTORY"
         echo
