@@ -172,7 +172,7 @@ private struct ServerDetail: View {
         Task {
             do {
                 let repaired = try await setup.add(destination: server.host, name: server.name, port: server.port, existing: server)
-                store.add(repaired)
+                store.applySetup(repaired)
                 fleet.connection(server.id)?.restart()
                 message = "Repaired."
             } catch {

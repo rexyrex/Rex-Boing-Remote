@@ -148,6 +148,52 @@ struct ConnectionCheck {
               && SSH.isUsableDestination("alex@nas.local") && SSH.isUsableDestination("nas"),
               "a typed destination that would read as an option, or has spaces, is refused")
 
+        // MARK: The saved list
+
+        // A list from another version still loads: keys it didn't have take
+        // their defaults, values it doesn't know become the default ones,
+        // and a server that can't be read at all costs only itself.
+        let saved = Data("""
+            {"version":1,"servers":[
+              {"id":"6D0D2C3A-0001-4C1E-9E7B-DE00000000AA","name":"Old","host":"old.local","character":"sumo","readout":"fans","auth":"telepathy"},
+              {"id":"6D0D2C3A-0001-4C1E-9E7B-DE00000000BB","host":"nameless.local"},
+              {"id":"6D0D2C3A-0001-4C1E-9E7B-DE00000000CC","name":"New","host":"new.local","addresses":["10.0.0.3"],"pinned":true,
+               "character":"ninja","readout":"gpu","keepHistory":true,"futureField":{"x":1}}
+            ]}
+            """.utf8)
+        let lenient = try? ServerStore.decode(saved)
+        let old = lenient?.servers.first
+        check(lenient?.servers.count == 2 && lenient?.dropped == 1
+              && old?.character == .rex && old?.readout == .cpu && old?.auth == .appKey && old?.addresses == [] && old?.pinned == false
+              && lenient?.servers.last?.character == .ninja && lenient?.servers.last?.keepHistory == true,
+              "a list from another version loads what it can (\(lenient?.servers.map(\.name) ?? []), \(lenient?.dropped ?? -1) dropped)")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        if let original = lenient?.servers.last, let once = try? encoder.encode(original),
+           let back = try? JSONDecoder().decode(Server.self, from: once), let twice = try? encoder.encode(back) {
+            let keys = (try? JSONSerialization.jsonObject(with: once) as? [String: Any])?.keys.sorted() ?? []
+            check(back == original && once == twice
+                  && keys == ["added", "addresses", "auth", "character", "host", "id", "keepHistory", "name", "pinned", "readout"],
+                  "and writes servers exactly as before (\(keys))")
+        } else {
+            check(false, "and writes servers exactly as before")
+        }
+
+        // Repair and adding again take only what setup found, leaving what
+        // the user changed while it ran.
+        let before = Server(name: "Box", host: "box.local", os: "linux", agentVersion: "0.1.0")
+        let store = ServerStore(inMemory: [before])
+        store.update(before.id) { $0.name = "Renamed"; $0.pinned = true; $0.character = .ninja; $0.keepHistory = true }
+        var repaired = before
+        repaired.os = "darwin"
+        repaired.agentVersion = "0.3.0"
+        repaired.auth = .userSSH
+        store.applySetup(repaired)
+        let after = store.server(before.id)
+        check(after?.name == "Renamed" && after?.pinned == true && after?.character == .ninja && after?.keepHistory == true
+              && after?.os == "darwin" && after?.agentVersion == "0.3.0" && after?.auth == .userSSH,
+              "a repair keeps edits made while it ran, and takes what it found")
+
         // MARK: The macOS agent's authorized_keys and upgrades
 
         // Lines the agent doesn't own survive byte for byte, whatever their

@@ -86,3 +86,32 @@ struct Server: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+extension Server {
+    /// Reads a saved server leniently, so a list written by another version
+    /// still loads: a key from before it existed takes its default, and a
+    /// character, readout or way in this version doesn't know becomes the
+    /// default one, rather than failing the whole list. Writing is the
+    /// synthesized `encode(to:)`, so the file looks exactly as before.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func optional<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+            (try? container.decodeIfPresent(type, forKey: key)) ?? nil
+        }
+        self.init(name: try container.decode(String.self, forKey: .name),
+                  host: try container.decode(String.self, forKey: .host))
+        id = optional(UUID.self, .id) ?? id
+        user = optional(String.self, .user)
+        port = optional(Int.self, .port)
+        addresses = optional([String].self, .addresses) ?? addresses
+        hostKeyAlias = optional(String.self, .hostKeyAlias)
+        auth = optional(String.self, .auth).flatMap(Auth.init(rawValue:)) ?? auth
+        os = optional(String.self, .os)
+        arch = optional(String.self, .arch)
+        agentVersion = optional(String.self, .agentVersion)
+        keepHistory = optional(Bool.self, .keepHistory)
+        pinned = optional(Bool.self, .pinned) ?? pinned
+        character = optional(String.self, .character).flatMap(Visualizer.init(rawValue:)) ?? character
+        readout = optional(String.self, .readout).flatMap(Readout.init(rawValue:)) ?? readout
+        added = optional(Date.self, .added) ?? added
+    }
+}

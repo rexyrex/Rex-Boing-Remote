@@ -34,6 +34,26 @@ final class ServerStore: ObservableObject {
         save()
     }
 
+    /// Takes in what setup (Repair, or adding a server again) found out:
+    /// how to reach the server, how it logs in and what runs there. Every
+    /// other field is left as it is now, since setup can take minutes and
+    /// the user may rename, pin or restyle the server meanwhile. A server
+    /// that isn't in the list is added.
+    func applySetup(_ result: Server) {
+        guard server(result.id) != nil else { return add(result) }
+        update(result.id) { server in
+            server.host = result.host
+            server.user = result.user
+            server.port = result.port
+            server.addresses = result.addresses
+            server.auth = result.auth
+            server.os = result.os
+            server.arch = result.arch
+            server.agentVersion = result.agentVersion
+            server.hostKeyAlias = result.hostKeyAlias
+        }
+    }
+
     func update(_ id: Server.ID, _ change: (inout Server) -> Void) {
         guard let index = servers.firstIndex(where: { $0.id == id }) else { return }
         var server = servers[index]
@@ -63,10 +83,44 @@ final class ServerStore: ObservableObject {
         var servers: [Server]
     }
 
+    /// The saved list, keeping every server that can be read even when some
+    /// can't; `dropped` says how many couldn't.
+    static func decode(_ data: Data) throws -> (servers: [Server], dropped: Int) {
+        struct Lenient: Decodable {
+            var servers: [Server] = []
+            var dropped = 0
+
+            enum CodingKeys: String, CodingKey { case servers }
+            struct Skip: Decodable { init(from decoder: Decoder) {} }
+
+            init(from decoder: Decoder) throws {
+                var list = try decoder.container(keyedBy: CodingKeys.self).nestedUnkeyedContainer(forKey: .servers)
+                while !list.isAtEnd {
+                    if let server = try? list.decode(Server.self) {
+                        servers.append(server)
+                    } else {
+                        _ = try list.decode(Skip.self)
+                        dropped += 1
+                    }
+                }
+            }
+        }
+        let file = try JSONDecoder().decode(Lenient.self, from: data)
+        return (file.servers, file.dropped)
+    }
+
     private func load() {
         guard let data = try? Data(contentsOf: Paths.hosts) else { return }
         do {
-            servers = try JSONDecoder().decode(File.self, from: data).servers
+            let file = try Self.decode(data)
+            servers = file.servers
+            if file.dropped > 0 {
+                // The next save writes the list without the servers that
+                // couldn't be read: keep a copy of it as it was first.
+                let backup = Paths.hosts.deletingPathExtension()
+                    .appendingPathExtension("partly-unreadable-\(Int(Date().timeIntervalSince1970)).json")
+                try? FileManager.default.copyItem(at: Paths.hosts, to: backup)
+            }
         } catch {
             // Keep the unreadable file for the user instead of overwriting it
             // with an empty list on the next save.

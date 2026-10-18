@@ -132,11 +132,12 @@ struct AddServerView: View {
         failure = nil
         added = nil
         let existing = store.servers.first { $0.host == destination && $0.port == port }
+        let typedName = name.isEmpty ? nil : name
         Task {
             do {
                 let server = try await setup.add(
-                    destination: destination, name: name.isEmpty ? nil : name, port: port, existing: existing)
-                finish(server)
+                    destination: destination, name: typedName, port: port, existing: existing)
+                finish(server, name: typedName)
             } catch let error as Setup.Failure {
                 failure = error
             } catch {
@@ -209,7 +210,7 @@ struct AddServerView: View {
         Task {
             do {
                 let server = try await setup.add(code: parsed, existing: existing)
-                finish(server)
+                finish(server, name: nil)
             } catch let error as Setup.Failure {
                 failure = error
             } catch {
@@ -247,16 +248,24 @@ struct AddServerView: View {
         }
     }
 
-    private func finish(_ server: Server) {
+    private func finish(_ server: Server, name typedName: String?) {
         var server = server
-        if !store.servers.contains(where: { $0.id == server.id }), store.servers.isEmpty {
-            // The first server gets its own rex, so the menu bar shows the
-            // app working the moment setup ends.
-            server.pinned = true
+        if store.server(server.id) != nil {
+            // Added again: what setup found replaces what the list had, and
+            // so does a name typed for it, but nothing else changed while
+            // setup ran is undone.
+            store.applySetup(server)
+            if let typedName { store.update(server.id) { $0.name = typedName } }
+        } else {
+            if store.servers.isEmpty {
+                // The first server gets its own rex, so the menu bar shows
+                // the app working the moment setup ends.
+                server.pinned = true
+            }
+            store.add(server)
         }
-        store.add(server)
         settings.applyFirstRunLoginChoice(launchAtLogin)
-        added = server
+        added = store.server(server.id) ?? server
         manual = ""
         name = ""
         code = ""
