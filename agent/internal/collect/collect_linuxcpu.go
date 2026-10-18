@@ -117,10 +117,10 @@ type linuxCPUState struct {
 	freqPaths  []string // scaling_cur_freq per entry of topoIDs, "" when absent
 	hasFreq    bool
 
-	// Reading scaling_cur_freq costs an IPI per core on some kernels, so
-	// vitals samples (which only feed the history behind the dashboard's
-	// clock graph) read the clocks every linuxClockEvery and repeat them in
-	// between; full samples read them every time.
+	// Reading scaling_cur_freq costs an IPI per core on some kernels. The
+	// app uses the clocks of vitals samples only for the history behind the
+	// dashboard's clock graph, so vitals read them every linuxClockEvery and
+	// repeat them in between; full samples read them every time.
 	clocks   [3]*float64 // all, P, E
 	clocksAt time.Time
 
