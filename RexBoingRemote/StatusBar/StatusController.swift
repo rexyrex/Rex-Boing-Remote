@@ -24,7 +24,7 @@ final class StatusController: NSObject, NSPopoverDelegate {
         self.settings = settings
         super.init()
 
-        fleetItem = RexItem(autosaveName: "RexBoingRemoteFleet")
+        fleetItem = RexItem(autosaveName: Self.autosaveName("RexBoingRemoteFleet"))
         fleetItem.onClick = { [weak self] item, event in self?.clicked(item, event: event, server: nil) }
 
         popover.behavior = .transient
@@ -55,14 +55,24 @@ final class StatusController: NSObject, NSPopoverDelegate {
         }
     }
 
+    /// AppKit keeps each status item's place in the menu bar, and whether
+    /// it was dragged out, in the app's own defaults under its autosave
+    /// name: demo mode's rexes get names of their own, or moving or
+    /// removing one would move or remove the real one.
+    private static func autosaveName(_ name: String) -> String {
+        Demo.isActive ? name + "-Demo" : name
+    }
+
     // MARK: - A menu bar with no room
 
     private static let warnedHiddenKey = "warnedHiddenStatusItem"
+    /// Demo mode's own preferences, like the rest of its settings.
+    private static let defaults = Demo.isActive ? UserDefaults(suiteName: Demo.defaultsSuite) ?? .standard : .standard
 
     private func warnIfHidden() {
         guard !fleetItem.isOnScreen,
-              !UserDefaults.standard.bool(forKey: Self.warnedHiddenKey) else { return }
-        UserDefaults.standard.set(true, forKey: Self.warnedHiddenKey)
+              !Self.defaults.bool(forKey: Self.warnedHiddenKey) else { return }
+        Self.defaults.set(true, forKey: Self.warnedHiddenKey)
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Your menu bar is full"
@@ -126,7 +136,7 @@ final class StatusController: NSObject, NSPopoverDelegate {
         }
         for server in pinned {
             let item = pinnedItems[server.id] ?? {
-                let item = RexItem(autosaveName: "RexBoingRemote-\(server.id.uuidString)")
+                let item = RexItem(autosaveName: Self.autosaveName("RexBoingRemote-\(server.id.uuidString)"))
                 item.onClick = { [weak self] item, event in
                     self?.clicked(item, event: event, server: server.id)
                 }
