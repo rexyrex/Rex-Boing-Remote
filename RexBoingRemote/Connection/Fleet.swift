@@ -19,6 +19,7 @@ final class Fleet: ObservableObject {
     private var watchdog: Timer?
     private let pathMonitor = NWPathMonitor()
     private var lastPath: (status: NWPath.Status, interfaces: [String])?
+    private var networkSettle: Timer?
     private var asleep = false
 
     init(store: ServerStore, settings: AppSettings) {
@@ -151,8 +152,19 @@ final class Fleet: ObservableObject {
         guard !asleep, let lastPath else { return }
         guard status == .satisfied else { return }
         if lastPath.status != .satisfied || lastPath.interfaces != interfaces {
-            let now = Date()
-            connections.values.forEach { $0.networkChanged(now: now) }
+            // Interfaces change in bursts — a VPN or Tailscale coming up adds
+            // and renames several within a second or two — so the
+            // connections hear about it once, when the burst has settled.
+            networkSettle?.invalidate()
+            let timer = Timer(timeInterval: 2, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.asleep else { return }
+                    let now = Date()
+                    self.connections.values.forEach { $0.networkChanged(now: now) }
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            networkSettle = timer
         }
     }
 }

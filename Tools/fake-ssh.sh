@@ -49,6 +49,37 @@ case "$FAKE_SSH_SCENARIO" in
         cat "$FAKE_SSH_HISTORY"
         echo
         for i in $(seq 1 1000); do sample "$i"; sleep 0.3; done ;;
+    noisy-drop)
+        # A login that grumbles on every connect (a .zshenv sourcing a file
+        # that isn't there), then a session that drops like any other.
+        echo "/home/rex/.zshenv:3: no such file or directory: /opt/tool/env.sh" >&2
+        if [ "$n" -eq 1 ]; then
+            stream 3
+            echo "Connection to fake closed by remote host." >&2
+            exit 255
+        fi
+        stream 1000 ;;
+    one-sample-crash)
+        # An agent that dies right after its first sample, every time.
+        echo "$hello"
+        sample 1
+        echo "rex-boing-agent: panic: runtime error" >&2
+        exit 2 ;;
+    old-protocol)
+        echo '{"type":"hello","protocol":0,"agent":{"name":"rex-boing-agent","version":"0.0.1","os":"linux","arch":"amd64"}}'
+        for i in $(seq 1 1000); do sample "$i"; sleep 0.3; done ;;
+    notice-then-fixed)
+        # The first session's agent has a problem to report; by the second,
+        # it was fixed.
+        if [ "$n" -eq 1 ]; then
+            echo "$hello"
+            sample 1
+            echo '{"type":"notice","code":"rapl-denied","message":"CPU power needs read access to /sys/class/powercap."}'
+            sample 2
+            echo "Connection to fake closed by remote host." >&2
+            exit 255
+        fi
+        stream 1000 ;;
     drop-then-recover)
         if [ "$n" -le 2 ]; then
             stream 2

@@ -13,7 +13,12 @@ final class AgentSession: @unchecked Sendable {
         /// (PROTOCOL.md, "Background history"). Decoded here, off the main
         /// actor: a two-day history is a few hundred kilobytes.
         case history(WireHistory)
-        case ended(status: Int32, stderr: String)
+        /// `stderr` is the tail of everything ssh wrote there. `sinceOutput`
+        /// is what it wrote after the first line of output, nil if there
+        /// was none: once the agent is talking, only that can say why the
+        /// session ended, and what the login printed before it (a shell
+        /// startup file's complaints) is noise.
+        case ended(status: Int32, stderr: String, sinceOutput: String?)
     }
 
     /// The longest line the protocol allows. A server that sends more is
@@ -27,6 +32,9 @@ final class AgentSession: @unchecked Sendable {
     private let stderrPipe = Pipe()
     private var buffer = Data()
     private var stderrTail = Data()
+    private var stderrSinceOutput: Data?
+    private var outputClosed = false
+    private var errorsClosed = false
     private var finished = false
     private let onEvent: @MainActor @Sendable (Event) -> Void
     private let decoder = JSONDecoder()
@@ -65,9 +73,9 @@ final class AgentSession: @unchecked Sendable {
         }
         let exited: @Sendable (Int32) -> Void = { [weak self] status in
             guard let self else { return }
-            // A moment for the read handlers to hand over what the child wrote
+            // The read handlers still have to hand over what the child wrote
             // last — often the one line of stderr that explains the exit.
-            self.queue.asyncAfter(deadline: .now() + 0.15) { self.finish(status: status) }
+            self.queue.async { self.finish(status: status, giveUpAt: .now() + 1) }
         }
         if let replay {
             replay.start(
@@ -128,13 +136,14 @@ final class AgentSession: @unchecked Sendable {
     // MARK: - Queue-confined
 
     private func receive(_ data: Data) {
-        guard !finished else { return }
-        if data.isEmpty { return }
+        if data.isEmpty { outputClosed = true }
+        guard !finished, !data.isEmpty else { return }
         buffer.append(data)
         while let newline = buffer.firstIndex(of: 0x0A) {
             let line = buffer[buffer.startIndex..<newline]
             buffer.removeSubrange(buffer.startIndex...newline)
             guard !line.isEmpty else { continue }
+            if stderrSinceOutput == nil { stderrSinceOutput = Data() }
             switch WireMessage.decode(Data(line), decoder: decoder) {
             case .other("history"):
                 if let history = try? decoder.decode(WireHistory.self, from: Data(line)) {
@@ -154,28 +163,42 @@ final class AgentSession: @unchecked Sendable {
     }
 
     private func receiveError(_ data: Data) {
-        guard !data.isEmpty else { return }
+        if data.isEmpty { errorsClosed = true }
+        guard !finished, !data.isEmpty else { return }
         appendError(data)
     }
 
     private func appendError(_ data: Data) {
         stderrTail.append(data)
         if stderrTail.count > 8192 { stderrTail.removeFirst(stderrTail.count - 8192) }
+        if var late = stderrSinceOutput {
+            late.append(data)
+            if late.count > 8192 { late.removeFirst(late.count - 8192) }
+            stderrSinceOutput = late
+        }
     }
 
-    private func finish(status: Int32) {
+    /// Reports the end once both pipes have been read to their end of file,
+    /// so the last thing the child wrote is part of it, or after a second
+    /// regardless, in case something it left behind holds a pipe open.
+    ///
+    /// The read handlers stay the only readers until then. Reading the
+    /// pipes here as well, or making them non-blocking, while a handler may
+    /// be in the middle of `availableData` can make that read fail, which
+    /// raises an exception nothing catches.
+    private func finish(status: Int32, giveUpAt: DispatchTime) {
         guard !finished else { return }
-        // Drain what is still buffered in the pipes before reporting the end,
-        // so a final error line from ssh is part of the explanation.
-        let rest = stdoutPipe.fileHandleForReading.readDataToEndOfFileNonBlocking()
-        receive(rest)
-        appendError(stderrPipe.fileHandleForReading.readDataToEndOfFileNonBlocking())
+        if !(outputClosed && errorsClosed), DispatchTime.now() < giveUpAt {
+            queue.asyncAfter(deadline: .now() + 0.05) { [self] in finish(status: status, giveUpAt: giveUpAt) }
+            return
+        }
         finished = true
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         try? stdinPipe.fileHandleForWriting.close()
         let text = String(decoding: stderrTail, as: UTF8.self)
-        deliver(.ended(status: status, stderr: text))
+        let sinceOutput = stderrSinceOutput.map { String(decoding: $0, as: UTF8.self) }
+        deliver(.ended(status: status, stderr: text, sinceOutput: sinceOutput))
     }
 
     private func deliver(_ event: Event) {
@@ -183,21 +206,5 @@ final class AgentSession: @unchecked Sendable {
         DispatchQueue.main.async {
             MainActor.assumeIsolated { onEvent(event) }
         }
-    }
-}
-
-private extension FileHandle {
-    /// Whatever is left in a pipe whose writer has exited.
-    func readDataToEndOfFileNonBlocking() -> Data {
-        let flags = fcntl(fileDescriptor, F_GETFL)
-        _ = fcntl(fileDescriptor, F_SETFL, flags | O_NONBLOCK)
-        var result = Data()
-        var chunk = [UInt8](repeating: 0, count: 65536)
-        while true {
-            let count = Darwin.read(fileDescriptor, &chunk, chunk.count)
-            if count <= 0 { break }
-            result.append(chunk, count: count)
-        }
-        return result
     }
 }

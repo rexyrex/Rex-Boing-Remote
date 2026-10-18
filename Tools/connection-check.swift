@@ -19,22 +19,34 @@ struct ConnectionCheck {
         let fake = ProcessInfo.processInfo.environment["FAKE_SSH"] ?? tools.appendingPathComponent("fake-ssh.sh").path
         SSH.ssh = fake
 
+        /// The reasons given for each wait in the last run.
+        var reasons: [String] = []
+        func counter(_ scenario: String) -> URL {
+            FileManager.default.temporaryDirectory.appendingPathComponent("fake-ssh-\(scenario)-\(getpid())")
+        }
+        /// How many times the fake ssh ran for a scenario, -G aside.
+        func attempts(_ scenario: String) -> Int {
+            Int((try? String(contentsOf: counter(scenario), encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+        }
+
         /// Runs one scenario for up to `seconds`, ticking the watchdog the way
         /// the fleet does, and returns the states it passed through.
         func run(_ scenario: String, seconds: Double, until done: (ServerConnection, [String]) -> Bool) -> (ServerConnection, [String]) {
-            let counter = FileManager.default.temporaryDirectory.appendingPathComponent("fake-ssh-\(scenario)-\(getpid())")
+            let counter = counter(scenario)
             try? FileManager.default.removeItem(at: counter)
             setenv("FAKE_SSH_SCENARIO", scenario, 1)
             setenv("FAKE_SSH_COUNTER", counter.path, 1)
             let connection = ServerConnection(server: Server(name: scenario, host: "fake"))
             var states: [String] = []
+            reasons = []
             let observer = connection.$state.sink { state in
                 let name: String
                 switch state {
                 case .idle: name = "idle"
                 case .connecting: name = "connecting"
                 case .live: name = "live"
-                case .waiting: name = "waiting"
+                case .waiting(_, let reason): name = "waiting"; reasons.append(reason)
                 case .attention(let issue): name = "attention:\(issue.title)"
                 }
                 if states.last != name { states.append(name) }
@@ -185,15 +197,86 @@ struct ConnectionCheck {
         } else {
             check(false, "a refused key stops and asks for repair (\(states))")
         }
+        // Not even a burst of network changes tries it again: that is for
+        // wake and Retry Now.
+        for _ in 0..<10 { connection.networkChanged(now: Date()) }
+        RunLoop.main.run(until: Date().addingTimeInterval(2))
+        check(attempts("refused") == 1, "network changes leave a refused key alone (\(attempts("refused")) attempts)")
         connection.stop()
+
+        // A server down for a while is tried at once when the network
+        // changes, but not again for every change that follows.
+        func isWaiting(_ state: ServerConnection.State) -> Bool {
+            if case .waiting = state { return true } else { return false }
+        }
+        (connection, states) = run("down-then-up", seconds: 5) { _, seen in seen.contains("waiting") }
+        connection.networkChanged(now: Date())
+        let retriedAtOnce = connection.state == .connecting
+        let failedAgain = Date().addingTimeInterval(5)
+        while Date() < failedAgain && !isWaiting(connection.state) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        for _ in 0..<5 { connection.networkChanged(now: Date()) }
+        check(retriedAtOnce && isWaiting(connection.state),
+              "a burst of network changes retries a waiting server once (\(retriedAtOnce), then \(connection.state))")
+        connection.stop()
+
+        // A login that prints noise before the agent starts, then a drop:
+        // an ordinary reconnect, not "the agent is missing".
+        (connection, states) = run("noisy-drop", seconds: 12) { c, seen in seen.contains("waiting") && c.state == .live }
+        check(connection.state == .live && !states.contains { $0.hasPrefix("attention") } && reasons == ["The connection dropped."],
+              "shell startup noise doesn't turn a drop into a problem (\(states.joined(separator: " → ")); \(reasons))")
+        connection.stop()
+
+        // An agent that dies right after its first sample backs off like
+        // any other failure instead of being restarted every second.
+        (connection, states) = run("one-sample-crash", seconds: 15) { _, _ in false }
+        check(attempts("one-sample-crash") <= 5, "an agent that keeps dying is retried with backoff (\(attempts("one-sample-crash")) attempts in 15 s)")
+        connection.stop()
+
+        // An agent too old to understand stops for good, without a retry.
+        (connection, states) = run("old-protocol", seconds: 8) { _, _ in false }
+        check(connection.state == .attention(.incompatibleAgent("0.0.1")) && attempts("old-protocol") == 1,
+              "an agent with an older protocol stops and stays stopped (\(states.joined(separator: " → ")), \(attempts("old-protocol")) attempt)")
+        connection.stop()
+
+        // A notice from one session is gone once the next one doesn't send it.
+        var noticed = false
+        (connection, states) = run("notice-then-fixed", seconds: 12) { c, seen in
+            if !c.notices.isEmpty { noticed = true }
+            return noticed && seen.contains("waiting") && c.state == .live
+        }
+        check(noticed && connection.notices.isEmpty, "a notice the agent stopped sending goes away (\(connection.notices))")
+        connection.stop()
+
+        // A restart while ssh -G is still answering launches the new target,
+        // never the old one.
+        let launches = FileManager.default.temporaryDirectory.appendingPathComponent("fake-ssh-launches-\(getpid())")
+        try? FileManager.default.removeItem(at: launches)
+        try? FileManager.default.removeItem(at: counter("moving"))
+        setenv("FAKE_SSH_SCENARIO", "steady", 1)
+        setenv("FAKE_SSH_COUNTER", counter("moving").path, 1)
+        setenv("FAKE_SSH_LOG", launches.path, 1)
+        setenv("FAKE_SSH_G_DELAY", "1", 1)
+        let moving = ServerConnection(server: Server(name: "moving", host: "old-host"))
+        moving.start()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        var moved = moving.server
+        moved.host = "new-host"
+        moving.update(moved)
+        let movingDeadline = Date().addingTimeInterval(8)
+        while Date() < movingDeadline && moving.state != .live { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        moving.stop()
+        unsetenv("FAKE_SSH_G_DELAY")
+        unsetenv("FAKE_SSH_LOG")
+        let launched = ((try? String(contentsOf: launches, encoding: .utf8)) ?? "").split(separator: "\n").filter { !$0.contains("-G") }
+        check(launched.count == 1 && launched[0].hasSuffix("-- new-host stream"),
+              "a restart during ssh -G launches only the new target (\(launched.map { $0.split(separator: " ").suffix(2).joined(separator: " ") }))")
+        try? FileManager.default.removeItem(at: launches)
+        RunLoop.main.run(until: Date().addingTimeInterval(2))
 
         // A changed host key stops for good: no retry, ever.
         (connection, states) = run("host-key", seconds: 4) { _, _ in false }
         check(connection.state == .attention(.hostKeyChanged), "a changed host key stops the connection")
-        let attempts = Int((try? String(contentsOf: FileManager.default.temporaryDirectory
-            .appendingPathComponent("fake-ssh-host-key-\(getpid())"), encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
-        check(attempts == 1, "and is never retried on its own (\(attempts) attempt)")
+        check(attempts("host-key") == 1, "and is never retried on its own (\(attempts("host-key")) attempt)")
         connection.retryNow()
         check(connection.state == .attention(.hostKeyChanged), "not even by Retry Now")
         connection.stop()

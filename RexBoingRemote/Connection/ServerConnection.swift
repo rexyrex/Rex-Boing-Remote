@@ -137,6 +137,17 @@ final class ServerConnection: ObservableObject, Identifiable {
     private var sawHistory = false
     private var sawSample = false
     private var avoidAgent = true
+    /// Bumped by every start and stop. Work that waits on something — ssh
+    /// -G, a Local Network probe — checks it afterwards, so an attempt that
+    /// was stopped or replaced meanwhile never launches or changes state.
+    private var generation = 0
+    /// When the current session's first sample arrived.
+    private var liveSince: Date?
+    /// The host name and port `ssh -G` resolved the destination to, so an
+    /// alias from ~/.ssh/config gets the Local Network diagnosis too.
+    private var resolved: (host: String, port: Int?)?
+    /// When a network change last brought a retry forward.
+    private var lastNetworkRetry: Date?
 
     init(server: Server) {
         self.id = server.id
@@ -163,6 +174,10 @@ final class ServerConnection: ObservableObject, Identifiable {
         sawHello = false
         sawHistory = false
         sawSample = false
+        liveSince = nil
+        resolved = nil
+        generation &+= 1
+        let generation = self.generation
         state = .connecting
         startedAt = Date()
         let target = SSH.Target.forServer(server, address: currentAddress)
@@ -172,7 +187,9 @@ final class ServerConnection: ObservableObject, Identifiable {
             // whether a jump host is involved, which decides whether the
             // user's SSH agent may be needed to get there.
             let config = await SSH.resolve(target.destination)
-            guard let self, self.state == .connecting, self.session == nil, !self.stopping else { return }
+            guard let self, self.generation == generation, self.state == .connecting,
+                  self.session == nil, !self.stopping else { return }
+            self.resolved = config["hostname"].map { ($0, config["port"].flatMap(Int.init)) }
             self.avoidAgent = !SSH.usesJumpHost(config)
             var arguments = SSH.background(target, auth: server.auth, avoidAgent: self.avoidAgent)
             switch server.auth {
@@ -210,6 +227,7 @@ final class ServerConnection: ObservableObject, Identifiable {
     func stop() {
         if session != nil { connectionLog.info("\(self.server.name, privacy: .public): stopping") }
         stopping = true
+        generation &+= 1
         retryTimer?.invalidate()
         retryTimer = nil
         session?.stop()
@@ -277,13 +295,27 @@ final class ServerConnection: ObservableObject, Identifiable {
     }
 
     /// A network change: a live stream that is already late is probably on a
-    /// dead route, so it is restarted now instead of after the watchdog.
+    /// dead route, so it is restarted now instead of after the watchdog. A
+    /// server waiting out its backoff is tried now, but at most every 30
+    /// seconds: interfaces come and go in bursts (a VPN reconnecting,
+    /// Tailscale re-routing). Problems that need the user are left to wake
+    /// and Retry Now, so interface churn never fills a server's auth log
+    /// with refused logins.
     func networkChanged(now: Date) {
-        if case .live = state, let last = lastSampleAt,
-           now.timeIntervalSince(last) > max(4, vitalsInterval * 2) {
-            session?.kill()
-        } else {
+        switch state {
+        case .live:
+            let interval = demand == .full ? 1 : vitalsInterval
+            if let last = lastSampleAt, now.timeIntervalSince(last) > max(4, interval * 2) {
+                session?.kill()
+            }
+        case .waiting:
+            if let last = lastNetworkRetry, now.timeIntervalSince(last) < 30 { return }
+            lastNetworkRetry = now
             retryNow()
+        case .idle:
+            start()
+        case .connecting, .attention:
+            break
         }
     }
 
@@ -295,11 +327,21 @@ final class ServerConnection: ObservableObject, Identifiable {
             handle(message)
         case .history(let wire):
             receive(wire)
-        case .ended(let status, let stderr):
+        case .ended(let status, let stderr, let sinceOutput):
             session = nil
             guard !stopping else { return }
             connectionLog.notice("\(self.server.name, privacy: .public): ssh ended (status \(status)): \(stderr.suffix(300), privacy: .public)")
-            ended(status: status, stderr: stderr)
+            if sawHello {
+                // The agent was running, so the login worked and the agent
+                // is there: this is a drop, whatever the login printed on
+                // the way in (a shell startup file's "no such file or
+                // directory" is not a missing agent).
+                if downSince == nil { downSince = Date() }
+                advanceAddress()
+                scheduleRetry(reason: Self.explain(stderr: sinceOutput ?? "", status: status))
+            } else {
+                ended(status: status, stderr: stderr)
+            }
         }
     }
 
@@ -309,9 +351,16 @@ final class ServerConnection: ObservableObject, Identifiable {
             sawHello = true
             connectionLog.info("\(self.server.name, privacy: .public): hello from agent \(hello.agent?.version ?? "?", privacy: .public)")
             self.hello = hello
+            // Agents send their notices again in every session, so one
+            // whose cause was fixed meanwhile goes away.
+            notices = [:]
             if (hello.protocol ?? 0) < 1 {
                 state = .attention(.incompatibleAgent(hello.agent?.version ?? "unknown"))
+                // Let go of the session as well as stopping it: its samples
+                // would mark it live again, and its end would schedule a
+                // retry, which can only meet the same agent.
                 session?.stop()
+                session = nil
                 return
             }
             sendDemand()
@@ -335,8 +384,12 @@ final class ServerConnection: ObservableObject, Identifiable {
             if state != .live {
                 state = .live
                 downSince = nil
+                liveSince = Date()
             }
-            attempt = 0
+            // The backoff starts over once a session has stayed up a while,
+            // not at its first sample: an agent that dies right after one
+            // would otherwise be restarted every second, forever.
+            if let liveSince, Date().timeIntervalSince(liveSince) >= 30 { attempt = 0 }
         case .notice(let code, let message):
             notices[code] = message
         case .other:
@@ -437,10 +490,13 @@ final class ServerConnection: ObservableObject, Identifiable {
             scheduleSlowRetry()
             return
         }
-        if text.contains("no route to host"), LocalNetwork.isLocal(SSH.Target.forServer(server, address: currentAddress).destination) {
+        let host = resolved?.host ?? currentHostForProbe
+        if text.contains("no route to host"), LocalNetwork.isLocal(host) {
+            let port = resolved?.port ?? server.port ?? 22
+            let generation = self.generation
             Task { [weak self] in
-                let denied = await LocalNetwork.isDenied(host: self?.currentHostForProbe ?? "", port: self?.server.port ?? 22)
-                guard let self else { return }
+                let denied = await LocalNetwork.isDenied(host: host, port: port)
+                guard let self, self.generation == generation, self.session == nil, !self.stopping else { return }
                 if denied {
                     self.state = .attention(.localNetworkDenied)
                     self.scheduleSlowRetry()
@@ -457,7 +513,7 @@ final class ServerConnection: ObservableObject, Identifiable {
 
     /// Delays: 1, 2, 4, 8, 15, 30 seconds, then once a minute, each with a
     /// little jitter so a fleet that dropped together does not retry in
-    /// lockstep. A sample resets it.
+    /// lockstep. A session that stays live for half a minute resets it.
     private func scheduleRetry(reason: String) {
         attempt += 1
         let steps: [Double] = [1, 2, 4, 8, 15, 30, 60]
