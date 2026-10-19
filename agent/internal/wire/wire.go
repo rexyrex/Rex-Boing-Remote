@@ -205,6 +205,10 @@ type Volume struct {
 	FS        string `json:"fs,omitempty"`
 	Total     uint64 `json:"total"`
 	Available uint64 `json:"available"`
+	// Used is the space in use, where the filesystem says so. It can be
+	// less than Total - Available: ext4 keeps 5 % back for root by default,
+	// and those blocks are neither in use nor available.
+	Used *uint64 `json:"used,omitempty"`
 }
 
 type Disk struct {

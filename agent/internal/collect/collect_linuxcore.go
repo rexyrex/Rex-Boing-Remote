@@ -23,7 +23,7 @@ type linuxCollector struct {
 	clkTck       float64
 
 	// Wired in by newCollector; nil in fixture tests unless a test sets them.
-	statfs      func(path string) (total, avail uint64, err error)
+	statfs      func(path string) (linuxFSSize, error)
 	ifaceIPv4   func(name string) string
 	lookupUser  func(uid string) string
 	failedUnits func(ctx context.Context) ([]string, error)

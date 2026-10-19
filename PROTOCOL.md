@@ -214,7 +214,12 @@ this session), `primaryInterface`, `localAddress`, and `interfaces`: array of
 
 `read`, `write` (bytes/s, whole physical disks summed), `readTotal`,
 `writeTotal` (bytes this session), and `volumes`: array of
-`{"name","mount","fs","total","available"}`, the system volume first.
+`{"name","mount","fs","total","available","used"}`, the system volume first.
+`used` is optional: the bytes in use where the filesystem counts them itself
+(Linux statfs: total minus free blocks). It can be less than `total` minus
+`available`, because ext4 keeps 5 % back for root by default and those blocks
+are neither; clients then show fullness as `used / (used + available)`, as
+`df` does, and as `1 - available / total` without it.
 
 #### battery
 

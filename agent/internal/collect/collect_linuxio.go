@@ -290,11 +290,27 @@ type linuxDiskDev struct {
 	seen         bool
 }
 
+// linuxFSSize is a statfs result in bytes. free counts every unused block,
+// avail only those an ordinary user may take; the difference is the root
+// reserve (5 % of an ext4 filesystem by default).
+type linuxFSSize struct {
+	total, avail, free uint64
+}
+
+// volume reports the size as df does. The reserve is neither used nor
+// available, so fullness is used / (used + available): Total - Available
+// would count the reserve (100 GB of a 2 TB disk) as data.
+func (s linuxFSSize) volume(point, fs string) wire.Volume {
+	avail := min(s.avail, s.total)
+	used := s.total - min(max(s.free, avail), s.total)
+	return wire.Volume{Name: point, Mount: point, FS: fs, Total: s.total, Available: avail, Used: &used}
+}
+
 // linuxVolStat is the last statfs result for one mount.
 type linuxVolStat struct {
-	total, avail uint64
-	ok           bool
-	pending      bool
+	size    linuxFSSize
+	ok      bool
+	pending bool
 }
 
 // linuxDiskState keeps disk baselines, session totals and the volume cache.
@@ -516,14 +532,11 @@ func (c *linuxCollector) readVolumes() []wire.Volume {
 	for _, m := range mounts {
 		point := m.point
 		live[point] = true
-		total, avail, ok := c.volumeStat(point, linuxSlowFS[m.fs])
-		if !ok || total == 0 {
+		size, ok := c.volumeStat(point, linuxSlowFS[m.fs])
+		if !ok || size.total == 0 {
 			continue
 		}
-		if avail > total {
-			avail = total
-		}
-		out = append(out, wire.Volume{Name: point, Mount: point, FS: m.fs, Total: total, Available: avail})
+		out = append(out, size.volume(point, m.fs))
 	}
 	ds := &c.disk
 	ds.mu.Lock()
@@ -539,11 +552,11 @@ func (c *linuxCollector) readVolumes() []wire.Volume {
 // volumeStat runs statfs, from a goroutine with a 100 ms deadline for
 // network filesystems. A call that does not return keeps the mount marked
 // pending, so a dead server costs one stuck goroutine, never one per sample.
-func (c *linuxCollector) volumeStat(point string, slow bool) (total, avail uint64, ok bool) {
+func (c *linuxCollector) volumeStat(point string, slow bool) (size linuxFSSize, ok bool) {
 	statfs := c.statfs
 	if !slow {
-		t, a, err := statfs(c.path(point))
-		return t, a, err == nil
+		s, err := statfs(c.path(point))
+		return s, err == nil
 	}
 	ds := &c.disk
 	ds.mu.Lock()
@@ -556,9 +569,9 @@ func (c *linuxCollector) volumeStat(point string, slow bool) (total, avail uint6
 		ds.stats[point] = st
 	}
 	if st.pending {
-		t, a, ok := st.total, st.avail, st.ok
+		s, ok := st.size, st.ok
 		ds.mu.Unlock()
-		return t, a, ok
+		return s, ok
 	}
 	st.pending = true
 	ds.mu.Unlock()
@@ -566,10 +579,10 @@ func (c *linuxCollector) volumeStat(point string, slow bool) (total, avail uint6
 	done := make(chan struct{})
 	path := c.path(point)
 	go func() {
-		t, a, err := statfs(path)
+		s, err := statfs(path)
 		ds.mu.Lock()
 		if err == nil {
-			st.total, st.avail, st.ok = t, a, true
+			st.size, st.ok = s, true
 		}
 		st.pending = false
 		ds.mu.Unlock()
@@ -583,5 +596,5 @@ func (c *linuxCollector) volumeStat(point string, slow bool) (total, avail uint6
 	timer.Stop()
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
-	return st.total, st.avail, st.ok
+	return st.size, st.ok
 }

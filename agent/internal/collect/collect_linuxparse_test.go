@@ -3,6 +3,7 @@ package collect
 // Unit tests for the Linux text-format parsers.
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -225,5 +226,36 @@ func TestLinuxVirtualization(t *testing.T) {
 	c := newLinuxCollector(t.TempDir())
 	if got := c.virtualization(linuxCPUInfo{flags: " fpu hypervisor sse "}); got != "vm" {
 		t.Errorf("hypervisor flag → %q", got)
+	}
+}
+
+func TestLinuxVolumeReserve(t *testing.T) {
+	const block = 4096
+	cases := []struct {
+		name        string
+		size        linuxFSSize
+		avail, used uint64
+	}{
+		// A 2 TB ext4 root (statfs from a real NUC): df says 336G used,
+		// 1.5T available, 19 %; total - available would be 462 GB, 23 %.
+		{"ext4 reserve", linuxFSSize{total: 491697156 * block, free: 403852159 * block, avail: 378856870 * block},
+			378856870 * block, 359813107712},
+		{"no reserve", linuxFSSize{total: 100, free: 40, avail: 40}, 40, 60},
+		{"empty", linuxFSSize{total: 100, free: 100, avail: 95}, 95, 0},
+		// Network filesystems can report more available than free, or more
+		// of either than the whole: never a negative or wrapped size.
+		{"avail above free", linuxFSSize{total: 100, free: 30, avail: 40}, 40, 60},
+		{"above total", linuxFSSize{total: 100, free: 120, avail: 110}, 100, 0},
+	}
+	for _, c := range cases {
+		v := c.size.volume("/", "ext4")
+		if v.Total != c.size.total || v.Available != c.avail || v.Used == nil || *v.Used != c.used {
+			got := "nil"
+			if v.Used != nil {
+				got = strconv.FormatUint(*v.Used, 10)
+			}
+			t.Errorf("%s: total %d available %d used %s, want available %d used %d",
+				c.name, v.Total, v.Available, got, c.avail, c.used)
+		}
 	}
 }

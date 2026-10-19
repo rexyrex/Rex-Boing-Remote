@@ -39,16 +39,20 @@ func newCollector() Collector {
 }
 
 // linuxStatfs sizes a mounted filesystem the way df does.
-func linuxStatfs(path string) (total, avail uint64, err error) {
+func linuxStatfs(path string) (linuxFSSize, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
-		return 0, 0, err
+		return linuxFSSize{}, err
 	}
 	frsize := uint64(st.Frsize)
 	if frsize == 0 {
 		frsize = uint64(st.Bsize)
 	}
-	return uint64(st.Blocks) * frsize, uint64(st.Bavail) * frsize, nil
+	return linuxFSSize{
+		total: uint64(st.Blocks) * frsize,
+		avail: uint64(st.Bavail) * frsize,
+		free:  uint64(st.Bfree) * frsize,
+	}, nil
 }
 
 // linuxClockTicks reads AT_CLKTCK (USER_HZ, the unit of /proc/[pid]/stat

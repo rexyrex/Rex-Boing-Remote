@@ -68,7 +68,9 @@ func linuxTFixture(t *testing.T, name string) (*linuxCollector, string) {
 	t.Helper()
 	root := linuxTCopyFixture(t, name)
 	c := newLinuxCollector(root)
-	c.statfs = func(path string) (uint64, uint64, error) { return 100 << 30, 40 << 30, nil }
+	c.statfs = func(path string) (linuxFSSize, error) {
+		return linuxFSSize{total: 100 << 30, avail: 40 << 30, free: 45 << 30}, nil
+	}
 	return c, root
 }
 
@@ -1125,8 +1127,8 @@ func TestLinuxDisk(t *testing.T) {
 	if got := strings.Join(vols, " "); got != "/:ext4 /boot/efi:vfat /tank:zfs /mnt/backup:xfs /mnt/nas:cifs /games:ext4" {
 		t.Errorf("volumes %q", got)
 	}
-	if d.Volumes[0].Total != 100<<30 || d.Volumes[0].Available != 40<<30 || d.Volumes[0].Mount != "/" {
-		t.Errorf("root volume %+v", d.Volumes[0])
+	if v := d.Volumes[0]; v.Total != 100<<30 || v.Available != 40<<30 || v.Used == nil || *v.Used != 55<<30 || v.Mount != "/" {
+		t.Errorf("root volume %+v", v)
 	}
 	linuxTPut(t, root, "proc/diskstats", linuxTDiskstatsFile("259 0 nvme0n1 18 20", "8 0 sda 50 76", "8 1 sda1 900 900", "9 0 md0 900 900"))
 	linuxTPause(c, time.Second)
@@ -1187,14 +1189,14 @@ func TestLinuxSlowNetworkStatfs(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	calls := 0
-	c.statfs = func(path string) (uint64, uint64, error) {
+	c.statfs = func(path string) (linuxFSSize, error) {
 		if strings.HasSuffix(filepath.ToSlash(path), "/mnt/nas") {
 			mu.Lock()
 			calls++
 			mu.Unlock()
 			<-release // a dead CIFS server
 		}
-		return 10 << 30, 5 << 30, nil
+		return linuxFSSize{total: 10 << 30, avail: 5 << 30, free: 5 << 30}, nil
 	}
 	start := time.Now()
 	vols := c.readVolumes()
@@ -1587,7 +1589,7 @@ func TestLinuxSamplerPanics(t *testing.T) {
 
 func TestLinuxMissingRoot(t *testing.T) {
 	c := newLinuxCollector(filepath.Join(t.TempDir(), "nothing"))
-	c.statfs = func(string) (uint64, uint64, error) { return 0, 0, errors.New("no") }
+	c.statfs = func(string) (linuxFSSize, error) { return linuxFSSize{}, errors.New("no") }
 	s := c.Sample(wire.DetailFull)
 	if s == nil || s.CPU != nil || s.Memory != nil || s.Thermal != nil || len(s.GPUs) != 0 {
 		t.Errorf("empty root sample %+v", s)
