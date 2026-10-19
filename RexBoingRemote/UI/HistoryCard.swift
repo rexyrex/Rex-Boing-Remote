@@ -406,7 +406,7 @@ private struct HistoryReadout: View {
             HStack(spacing: 10) {
                 ForEach(Array(rows), id: \.pid) { row in
                     HStack(spacing: 3) {
-                        Text(row.name).lineLimit(1).truncationMode(.middle)
+                        Text(row.displayName).lineLimit(1).truncationMode(.middle)
                         Text(String(format: "%.0f%%", row.cpuPercent)).foregroundStyle(Palette.cpu)
                     }
                     .help(row.commandLine ?? row.name)
