@@ -155,7 +155,7 @@ struct VolumesCard: View {
 
     var body: some View {
         Card(accent: Palette.disk, title: "Filesystems", symbol: "externaldrive", trailing: "\(volumes.count)") {
-            ForEach(volumes.sorted(by: { fraction($0) > fraction($1) })) { volume in
+            ForEach(volumes.sorted(by: { $0.fractionUsed > $1.fractionUsed })) { volume in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(volume.name ?? volume.mount ?? "?")
@@ -170,16 +170,11 @@ struct VolumesCard: View {
                             .metricValue(size: 10)
                             .foregroundStyle(.secondary)
                     }
-                    MiniBar(fraction: fraction(volume),
-                            accent: fraction(volume) > 0.9 ? Palette.critical : Palette.disk, height: 4)
+                    MiniBar(fraction: volume.fractionUsed,
+                            accent: volume.fractionUsed > 0.9 ? Palette.critical : Palette.disk, height: 4)
                 }
             }
         }
-    }
-
-    private func fraction(_ volume: WireVolume) -> Double {
-        guard let total = volume.total, total > 0 else { return 0 }
-        return 1 - Double(volume.available ?? 0) / Double(total)
     }
 }
 

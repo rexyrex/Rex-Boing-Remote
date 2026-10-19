@@ -12,7 +12,7 @@ packages:
   # Scripts/build.sh swaps this for a local checkout when REX_BOING_PATH is set.
   RexBoingKit:
     url: https://github.com/rexyrex/Rex-Boing
-    from: 1.2.0
+    from: 1.2.1
 
 settings:
   base:
