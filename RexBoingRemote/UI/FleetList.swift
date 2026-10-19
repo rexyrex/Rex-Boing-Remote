@@ -29,6 +29,10 @@ struct FleetList: View {
                         FleetRow(server: server, connection: connection, unit: settings.temperatureUnit)
                             .contentShape(Rectangle())
                             .onTapGesture { open(server.id) }
+                            // A tap gesture is invisible to VoiceOver; this is
+                            // the press it performs instead.
+                            .accessibilityHint("Opens this server's dashboard")
+                            .accessibilityAction { open(server.id) }
                         Divider().opacity(0.35).padding(.leading, 14)
                     }
                 }
