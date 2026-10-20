@@ -13,8 +13,9 @@ private final class DisplayLinkProxy: NSObject {
     }
 }
 
-/// One menu bar item: an animated rex and an optional readout, drawn with
-/// Rex Boing's own renderer so the characters move exactly as they do there.
+/// One menu bar item: an animated rex, Remote's signal mark and an optional
+/// readout, drawn with Rex Boing's own renderer so the characters move
+/// exactly as they do there.
 ///
 /// The rex's pace follows `load` (0–1). When the server it stands for is
 /// offline, `isAsleep` stills it and dims it, which is the menu bar's way of
@@ -42,7 +43,7 @@ final class RexItem: NSObject {
     private var displayLink: CADisplayLink?
     private var rootLayer: CALayer?
     private var visualLayer: CALayer?
-    private var layout = StatusBarRenderer.layout(cells: [], hasVisual: true)
+    private var layout = SignalBadge.layout(cells: [])
     private var clock: Double = 0
     private var smoothedLoad: Double = 0
     private var lastFrame: CFTimeInterval = 0
@@ -99,7 +100,7 @@ final class RexItem: NSObject {
     private func refreshReadout() {
         guard let button = statusItem.button else { return }
         let cells = readout.map { [$0] } ?? []
-        layout = StatusBarRenderer.layout(cells: cells, hasVisual: true)
+        layout = SignalBadge.layout(cells: cells)
         let scale = button.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
 
         var image: CGImage?
@@ -107,8 +108,10 @@ final class RexItem: NSObject {
             let label = NSColor.labelColor.usingColorSpace(.deviceRGB) ?? .labelColor
             neutralInk = label.withAlphaComponent(1)
             inkAlpha = Float(label.alphaComponent) * (isAsleep ? 0.45 : 1)
-            image = StatusBarRenderer.renderReadouts(
-                cells: cells, layout: layout, monochrome: isAsleep, scale: scale)
+            image = SignalBadge.compose(
+                readouts: StatusBarRenderer.renderReadouts(
+                    cells: cells, layout: layout, monochrome: isAsleep, scale: scale),
+                layout: layout, ink: label.withAlphaComponent(CGFloat(inkAlpha)), live: !isAsleep, scale: scale)
         }
         if statusItem.length != layout.size.width { statusItem.length = layout.size.width }
 

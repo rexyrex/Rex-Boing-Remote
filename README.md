@@ -2,7 +2,7 @@
 
 Your servers in the Mac menu bar, each with its own running rex.
 
-<p align="center"><img src="docs/menubar.png" width="548" alt="Three menu bar items: a ninja for a gaming PC with its GPU load, a rex for a home server with its CPU, and the fleet rex with how many servers are live and the busiest one's CPU."></p>
+<p align="center"><img src="docs/menubar.png" width="584" alt="Three menu bar items, each with Remote's signal mark beside the character: a ninja for a gaming PC with its GPU load, a rex for a home server with its CPU, and the fleet rex with how many servers are live and the busiest one's CPU."></p>
 
 <table>
   <tr>

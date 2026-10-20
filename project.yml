@@ -45,6 +45,10 @@ targets:
         INFOPLIST_FILE: RexBoingRemote/Info.plist
         CODE_SIGN_ENTITLEMENTS: RexBoingRemote/RexBoingRemote.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # The icon's violet, for controls and selection: it shows when the
+        # Mac's accent colour is Multicolor, and gives way to any other the
+        # user has chosen.
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_APP_SANDBOX: NO
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         COMBINE_HIDPI_IMAGES: YES

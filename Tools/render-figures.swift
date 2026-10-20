@@ -105,7 +105,7 @@ enum RenderFigures {
 
     /// The pinned servers' items and the fleet item, left to right as the bar
     /// shows them (the item created first sits furthest right), each drawn
-    /// by the status items' own readout renderer and character.
+    /// by the status items' own readout renderer, signal mark and character.
     @MainActor static func menubar(fleet: Fleet, store: ServerStore, settings: AppSettings, to path: String) {
         var items: [(cell: ReadoutCell?, character: Visualizer, load: Double, time: Double)] = []
         for (index, server) in store.servers.filter(\.pinned).reversed().enumerated() {
@@ -123,7 +123,7 @@ enum RenderFigures {
         let magnify: CGFloat = 4
         let gap: CGFloat = 8
         let inset: CGFloat = 10
-        let layouts = items.map { StatusBarRenderer.layout(cells: $0.cell.map { [$0] } ?? [], hasVisual: true) }
+        let layouts = items.map { SignalBadge.layout(cells: $0.cell.map { [$0] } ?? []) }
         let width = layouts.reduce(inset * 2) { $0 + $1.size.width } + gap * CGFloat(items.count - 1)
         let height = layouts.map(\.size.height).max() ?? 22
         let (rep, cg) = bitmap(width: Int(ceil(width * magnify)), height: Int(ceil(height * magnify)))
@@ -140,6 +140,7 @@ enum RenderFigures {
                     cells: item.cell.map { [$0] } ?? [], layout: layout, monochrome: false, scale: magnify) {
                     cg.draw(readouts, in: CGRect(origin: .zero, size: layout.size))
                 }
+                SignalBadge.draw(in: cg, layout: layout, ink: NSColor.labelColor, live: true)
                 cg.translateBy(x: layout.visual.minX, y: layout.visual.minY)
                 item.character.draw(
                     in: cg, rect: CGRect(origin: .zero, size: layout.visual.size), time: item.time,
