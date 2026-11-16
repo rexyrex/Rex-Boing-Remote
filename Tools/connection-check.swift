@@ -765,7 +765,10 @@ struct ConnectionCheck {
         setenv("FAKE_SSH_HISTORY", historyFile.path, 1)
         (connection, states) = run("history", seconds: 10) { c, _ in c.snapshot != nil }
         check(connection.background != .unknown && connection.background != .absent, "a history line marks the background agent as running")
-        check(connection.history.cpu.count == MetricsHistory.capacity,
+        // Everything the server's fine ring held, up to what the graphs'
+        // buffer keeps: more than the five minutes a window's graphs plot,
+        // and several times the popover's minute and a half.
+        check(connection.history.cpu.count >= 300 && connection.history.cpu.count <= MetricsHistory.capacity,
               "the graphs start full (\(connection.history.cpu.count) points after the first sample)")
         check(connection.rings.medium.points.count >= 100, "the long record holds the server's (\(connection.rings.medium.points.count) half-minutes)")
         check(connection.awayProcesses.samples.first?.rows.first?.name == "backup", "the busiest processes while away are kept")

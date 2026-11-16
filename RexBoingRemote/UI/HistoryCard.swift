@@ -54,7 +54,7 @@ struct HistoryCard: View {
 
             if series.points.count < 2 {
                 Text("Nothing recorded for this period yet.")
-                    .font(.system(size: 10.5))
+                    .dashFont(10.5)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 60)
             } else {
@@ -71,7 +71,7 @@ struct HistoryCard: View {
         case .running(let since):
             Label("The server has kept this since \(Self.moment(since)), including while this Mac was away.",
                   systemImage: "checkmark.circle")
-                .font(.system(size: 9.5))
+                .dashFont(9.5)
                 .foregroundStyle(.tertiary)
         case .absent:
             HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -85,7 +85,7 @@ struct HistoryCard: View {
                         .buttonStyle(.link)
                 }
             }
-            .font(.system(size: 9.5))
+            .dashFont(9.5)
             .foregroundStyle(.tertiary)
         case .unknown:
             EmptyView()
@@ -188,7 +188,7 @@ private struct HistoryCharts: View, Equatable {
                             }
                         }
                     }
-                    .font(.system(size: 9))
+                    .dashFont(9)
                     .foregroundStyle(.secondary)
                     chart(row, segments: segments, showsTime: index == rows.count - 1)
                         .frame(height: index == rows.count - 1 ? 58 : 42)
@@ -285,7 +285,7 @@ private struct HistoryCharts: View, Equatable {
                     if let number = value.as(Double.self) {
                         // One width for every graph, so their plots, and the
                         // line under the pointer, line up.
-                        Text(row.label(number)).font(.system(size: 8.5)).foregroundStyle(.tertiary)
+                        Text(row.label(number)).dashFont(8.5).foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .frame(width: HistoryCharts.axisWidth, alignment: .leading)
                     }
@@ -373,12 +373,12 @@ private struct HistoryReadout: View {
         VStack(alignment: .leading, spacing: 4) {
             if let date = hover.date, let point = series.nearest(to: date) {
                 Text(headline(point))
-                    .font(.system(size: 10, weight: .medium))
+                    .dashFont(10, weight: .medium)
                     .monospacedDigit()
                 processes(at: point.date)
             } else {
                 Text(summary)
-                    .font(.system(size: 10))
+                    .dashFont(10)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -412,15 +412,15 @@ private struct HistoryReadout: View {
                     .help(row.commandLine ?? row.name)
                 }
             }
-            .font(.system(size: 9.5))
+            .dashFont(9.5)
             .monospacedDigit()
             Text(table.live ? "Processes then"
                  : "The busiest moment of that quarter hour, \(table.timestamp.formatted(date: .omitted, time: .shortened))")
-                .font(.system(size: 8.5))
+                .dashFont(8.5)
                 .foregroundStyle(.tertiary)
         } else {
             Text("No process table kept for this moment.")
-                .font(.system(size: 9.5))
+                .dashFont(9.5)
                 .foregroundStyle(.tertiary)
         }
     }

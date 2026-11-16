@@ -91,6 +91,11 @@ Tools/check.sh            # builds the Debug app the renderer links against
 Tools/render-figures.sh   # docs/menubar.png, fleet.png, dashboard*.png, add-server-*.png
 ```
 
+The window's picture, `docs/window.png`, is the one exception: its sidebar and
+toolbar are AppKit's and cannot be read back off screen, so it is a screenshot
+of the demo window (`open "dist/Rex Boing Remote.app" --args --demo`, which
+opens it by itself; `screencapture -o -l <window id>`).
+
 ## Adding a metric
 
 1. Add the field to `PROTOCOL.md`, optional like every other.

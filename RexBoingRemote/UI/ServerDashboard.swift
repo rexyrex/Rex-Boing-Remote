@@ -8,16 +8,19 @@ struct ServerDashboard: View {
     @ObservedObject var settings: AppSettings
     var back: () -> Void
     var openSettings: () -> Void
+    var openWindow: () -> Void
     /// Full detail from the server for as long as this dashboard exists.
     @StateObject private var viewer: ViewerLease
 
     init(server: Server, connection: ServerConnection, settings: AppSettings,
-         back: @escaping () -> Void, openSettings: @escaping () -> Void) {
+         back: @escaping () -> Void, openSettings: @escaping () -> Void,
+         openWindow: @escaping () -> Void = {}) {
         self.server = server
         self.connection = connection
         self.settings = settings
         self.back = back
         self.openSettings = openSettings
+        self.openWindow = openWindow
         _viewer = StateObject(wrappedValue: connection.addViewer())
     }
 
@@ -25,7 +28,7 @@ struct ServerDashboard: View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.5)
-            if let issue = issue {
+            if let issue = connection.issueTitle {
                 ConnectionBanner(connection: connection, issue: issue)
             }
             if let snapshot = connection.snapshot {
@@ -33,7 +36,7 @@ struct ServerDashboard: View {
             } else {
                 VStack(spacing: 10) {
                     ProgressView().controlSize(.small)
-                    Text(waitingText)
+                    Text(connection.waitingText(for: server))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -52,6 +55,8 @@ struct ServerDashboard: View {
         let unit = settings.temperatureUnit
         return ScrollView {
             VStack(spacing: Metrics.sectionSpacing) {
+                ServerBanner(server: server, connection: connection)
+
                 HStack(alignment: .top, spacing: Metrics.sectionSpacing) {
                     CPUCard(snapshot: snapshot, history: history, unit: unit)
                     GPUCard(snapshot: snapshot, history: history, unit: unit)
@@ -108,18 +113,11 @@ struct ServerDashboard: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 12, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(IconButtonStyle())
             .help("All servers")
             .accessibilityLabel("All servers")
 
-            Image(nsImage: CharacterIcon.image(for: server.character))
-                .renderingMode(.template)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: Visualizer.canvasSize.width, height: Visualizer.canvasSize.height)
-                .foregroundStyle(connection.state == .live ? Palette.cpu : .secondary)
-                .accessibilityHidden(true)
+            RemoteCharacter(character: server.character, isLive: connection.state == .live)
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
@@ -135,51 +133,29 @@ struct ServerDashboard: View {
                     .help(subtitle)
             }
             Spacer(minLength: 4)
-            Button(action: openSettings) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 12.5))
+            HStack(spacing: 2) {
+                Button(action: openWindow) {
+                    Image(systemName: "macwindow")
+                        .font(.system(size: 12.5))
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Open in a window")
+                .accessibilityLabel("Open in a window")
+                Button(action: openSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12.5))
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Settings")
+                .accessibilityLabel("Settings")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Settings")
-            .accessibilityLabel("Settings")
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
+        .background(HeaderWash())
     }
 
-    private var subtitle: String {
-        guard let host = connection.hello?.host else { return server.destinationLabel }
-        var parts: [String] = []
-        if let model = host.modelName ?? host.hostname { parts.append(model) }
-        if let chip = host.chipName, !chip.isEmpty { parts.append(chip) }
-        if let cores = host.logicalCores { parts.append("\(cores) threads") }
-        if let memory = host.memoryBytes { parts.append(Format.bytes(memory)) }
-        if let os = [host.osName, host.osVersion].compactMap({ $0 }).joined(separator: " ").nilIfEmpty { parts.append(os) }
-        if let uptime = connection.snapshot?.extras.system?.uptime {
-            parts.append("up \(Format.duration(uptime))")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private var issue: String? {
-        switch connection.state {
-        case .live, .idle: return nil
-        case .connecting: return connection.snapshot == nil ? nil : "Reconnecting…"
-        case .waiting(_, let reason): return reason
-        case .attention(let issue): return issue.title
-        }
-    }
-
-    private var waitingText: String {
-        switch connection.state {
-        case .connecting: return "Connecting to \(server.name)…"
-        case .waiting(_, let reason): return reason
-        case .attention(let issue): return issue.explanation(for: server)
-        case .idle: return "Paused."
-        case .live: return "Taking the first sample…"
-        }
-    }
+    private var subtitle: String { connection.hostLine(for: server) }
 }
 
 struct StateDot: View {

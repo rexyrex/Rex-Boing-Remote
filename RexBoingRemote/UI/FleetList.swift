@@ -52,12 +52,7 @@ private struct FleetRow: View {
     var body: some View {
         HStack(spacing: 8) {
             HStack(spacing: 8) {
-                Image(nsImage: CharacterIcon.image(for: server.character))
-                    .renderingMode(.template)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 27, height: 16.5)
-                    .foregroundStyle(isLive ? Palette.cpu : Color.secondary.opacity(0.5))
+                RemoteCharacter(character: server.character, isLive: isLive, width: 27)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
                         Text(server.name)

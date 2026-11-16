@@ -86,12 +86,17 @@ final class StatusController: NSObject, NSPopoverDelegate {
         if alert.runModal() == .alertFirstButtonReturn { openWindow() }
     }
 
-    func openWindow() {
+    /// The window, on `server` if one is named — the popover hands over the
+    /// one it was showing.
+    func openWindow(selecting server: Server.ID? = nil) {
         popover.performClose(nil)
-        DashboardWindow.shared.show(fleet: fleet, store: store, settings: settings, actions: PopoverActions(
-            addServer: { [weak self] in self?.openAddServer() },
-            openSettings: { [weak self] in self?.openSettings() },
-            close: { DashboardWindow.shared.close() }))
+        DashboardWindow.shared.show(
+            fleet: fleet, store: store, settings: settings,
+            actions: PopoverActions(
+                addServer: { [weak self] in self?.openAddServer() },
+                openSettings: { [weak self] in self?.openSettings() },
+                close: { DashboardWindow.shared.close() }),
+            selecting: server)
     }
 
     // MARK: - Items
@@ -230,7 +235,8 @@ final class StatusController: NSObject, NSPopoverDelegate {
             actions: PopoverActions(
                 addServer: { [weak self] in self?.openAddServer() },
                 openSettings: { [weak self] in self?.openSettings() },
-                close: { [weak self] in self?.popover.performClose(nil) }))
+                close: { [weak self] in self?.popover.performClose(nil) },
+                openWindow: { [weak self] in self?.openWindow(selecting: self?.navigation.selected) }))
         var sized = root
         sized.maxHeight = min(760, (button.window?.screen?.visibleFrame.height ?? 900) - 40)
         let controller = NSHostingController(rootView: sized)
@@ -300,4 +306,7 @@ struct PopoverActions {
     var addServer: () -> Void
     var openSettings: () -> Void
     var close: () -> Void
+    /// The same servers in a window that stays open. Nothing to do where
+    /// the view is already in that window.
+    var openWindow: () -> Void = {}
 }

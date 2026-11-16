@@ -30,7 +30,8 @@ struct PopoverView: View {
                 ServerDashboard(
                     server: server, connection: connection, settings: settings,
                     back: { navigation.selected = nil },
-                    openSettings: actions.openSettings)
+                    openSettings: actions.openSettings,
+                    openWindow: actions.openWindow)
                     .id(id)
             } else {
                 header
@@ -48,41 +49,41 @@ struct PopoverView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(nsImage: CharacterIcon.image(for: settings.fleetCharacter))
-                .renderingMode(.template)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: Visualizer.canvasSize.width, height: Visualizer.canvasSize.height)
-                .foregroundStyle(Palette.cpu)
-                .accessibilityHidden(true)
+            RemoteCharacter(character: settings.fleetCharacter, isLive: true)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Rex \(Text("Boing").foregroundStyle(Palette.cpu)) Remote")
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
-                    .tracking(-0.3)
+                RemoteWordmark()
                 Text(summary)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
-            Button(action: actions.addServer) {
-                Image(systemName: "plus.circle")
-                    .font(.system(size: 13))
+            HStack(spacing: 2) {
+                Button(action: actions.openWindow) {
+                    Image(systemName: "macwindow")
+                        .font(.system(size: 12.5))
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Open in a window")
+                .accessibilityLabel("Open in a window")
+                Button(action: actions.addServer) {
+                    Image(systemName: "plus.circle")
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Add Server")
+                .accessibilityLabel("Add Server")
+                Button(action: actions.openSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12.5))
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Settings")
+                .accessibilityLabel("Settings")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Add Server")
-            .accessibilityLabel("Add Server")
-            Button(action: actions.openSettings) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 12.5))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Settings")
-            .accessibilityLabel("Settings")
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
+        .background(HeaderWash())
     }
 
     private var summary: String {
@@ -102,12 +103,7 @@ struct EmptyFleet: View {
     var body: some View {
         VStack(spacing: 14) {
             Spacer()
-            Image(nsImage: CharacterIcon.image(for: .rex))
-                .renderingMode(.template)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: Visualizer.canvasSize.width * 2.5, height: Visualizer.canvasSize.height * 2.5)
-                .foregroundStyle(Palette.cpu)
+            RemoteCharacter(character: .rex, isLive: true, width: Visualizer.canvasSize.width * 2.5)
             Text("Watch your servers from the menu bar")
                 .font(.system(size: 15, weight: .semibold))
             Text("Linux, macOS and Windows machines, over the SSH you already use. Nothing to open on your router, nothing running as root.")
@@ -122,6 +118,16 @@ struct EmptyFleet: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Remote's violet let into the top of a panel's header: the first thing
+/// that says this popover is not Rex Boing's.
+struct HeaderWash: View {
+    var body: some View {
+        LinearGradient(
+            colors: [Brand.violet.opacity(0.16), Brand.violet.opacity(0.03)],
+            startPoint: .top, endPoint: .bottom)
     }
 }
 

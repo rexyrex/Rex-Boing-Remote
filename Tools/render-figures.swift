@@ -11,7 +11,10 @@ import RexBoingKit
 //   Tools/render-figures.sh [outdir]      (default docs)
 //
 // Writes menubar.png, fleet.png, dashboard.png, dashboard-lower.png,
-// add-server-ssh.png and add-server-code.png.
+// add-server-ssh.png and add-server-code.png. The window's picture,
+// window.png, is not drawn here: its sidebar and toolbar belong to AppKit
+// and do not come back through the layers. It is a screenshot of the demo
+// window (see CONTRIBUTING.md).
 @main
 enum RenderFigures {
     static let scale: CGFloat = 2
@@ -47,7 +50,7 @@ enum RenderFigures {
             let recordings = Demo.machines.filter { if case .recording = $0.agent { true } else { false } }
             return recordings.allSatisfy { machine in
                 guard let connection = fleet.connection(machine.server.id) else { return false }
-                return connection.state == .live && connection.history.cpu.count >= MetricsHistory.capacity
+                return connection.state == .live && connection.history.cpu.count >= MetricsHistory.compactSpan
             }
         }
         guard ready else { print("the demo servers did not come up"); exit(1) }
@@ -66,7 +69,7 @@ enum RenderFigures {
         let dashboard = fleet.connection(home.id)!
         let tables = dashboard.processHistory.samples.count
         pump(until: 30) {
-            dashboard.processHistory.samples.count >= tables + 4 && dashboard.history.cpu.count >= MetricsHistory.capacity
+            dashboard.processHistory.samples.count >= tables + 4 && dashboard.history.cpu.count >= MetricsHistory.compactSpan
         }
         pump(1)
         popover.view.layoutSubtreeIfNeeded()

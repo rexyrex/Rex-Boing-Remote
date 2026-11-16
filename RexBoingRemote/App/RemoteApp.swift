@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             status?.openAddServer()
         }
         // On a full menu bar the rexes can be hidden; the window always shows.
-        if Demo.isActive {
+        if Demo.isActive || (settings.openWindowAtLaunch && !store.servers.isEmpty) {
             status?.openWindow()
         }
     }

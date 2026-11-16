@@ -304,6 +304,7 @@ private struct GeneralSettings: View {
             }
             Toggle("Show the busiest server's CPU beside the fleet rex", isOn: $settings.showFleetReadout)
             Toggle("Animate characters", isOn: $settings.animate)
+            Toggle("Open the window when Rex Boing Remote starts", isOn: $settings.openWindowAtLaunch)
             Toggle("Open at login", isOn: Binding(
                 get: { settings.launchAtLogin },
                 set: { settings.setLaunchAtLogin($0) }))

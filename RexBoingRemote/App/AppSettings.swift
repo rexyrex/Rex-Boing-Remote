@@ -38,6 +38,12 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(showFleetReadout, forKey: Keys.showFleetReadout) }
     }
 
+    /// Whether starting the app opens the window as well as the menu bar
+    /// items.
+    @Published var openWindowAtLaunch: Bool {
+        didSet { defaults.set(openWindowAtLaunch, forKey: Keys.openWindowAtLaunch) }
+    }
+
     @Published private(set) var launchAtLogin: Bool
 
     private enum Keys {
@@ -47,6 +53,7 @@ final class AppSettings: ObservableObject {
         static let animate = "animate"
         static let showFleetReadout = "showFleetReadout"
         static let askedAboutLogin = "askedAboutLogin"
+        static let openWindowAtLaunch = "openWindowAtLaunch"
     }
 
     static let intervals: [Double] = [1, 2, 5, 10]
@@ -58,6 +65,7 @@ final class AppSettings: ObservableObject {
         fleetCharacter = Visualizer(rawValue: defaults.string(forKey: Keys.fleetCharacter) ?? "") ?? .rex
         animate = defaults.object(forKey: Keys.animate) as? Bool ?? true
         showFleetReadout = defaults.object(forKey: Keys.showFleetReadout) as? Bool ?? true
+        openWindowAtLaunch = defaults.bool(forKey: Keys.openWindowAtLaunch)
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 

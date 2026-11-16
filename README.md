@@ -11,6 +11,8 @@ Your servers in the Mac menu bar, each with its own running rex.
   </tr>
 </table>
 
+<p align="center"><img src="docs/window.png" width="900" alt="The window: the servers down a sidebar, and all of them beside it as tiles, each with its character, a CPU trace and its vitals. One is flagged for a restart, one isn't answering."></p>
+
 <sub>The pictures come from the app's own views in demo mode: the servers are made up, the interface is real. See <a href="CONTRIBUTING.md#demo-mode-no-servers-needed">CONTRIBUTING.md</a>.</sub>
 
 Rex Boing Remote watches Linux, macOS and Windows machines over the SSH you
@@ -97,6 +99,17 @@ Windows (Settings › System › Optional features).
 - **Pin** a server (Settings › Servers) to give it a rex of its own, with a
   readout of your choice beside it. The first server you add is pinned.
 - Click a rex for the fleet list; click a server for its dashboard.
+- **Open the window** for the long look: the window button in the popover,
+  *Open Window* in a rex's right-click menu, or opening the app again from
+  Applications. It is an ordinary resizable window with the servers down a
+  sidebar. *All Servers* shows the fleet as tiles; a server shows a strip of
+  headline readings over every card with its detail open, in up to three
+  columns, with five minutes of history in the graphs. While it is open the
+  app is in the Dock and ⌘-Tab; Settings › General can open it at launch.
+- Everything Remote draws about itself is violet — its name, its characters,
+  the signal mark beside each rex in the menu bar — and every dashboard is
+  headed by a banner naming the machine it is reading and how it gets there,
+  so it is never mistaken for Rex Boing's view of this Mac.
 - A server that drops off falls asleep in the menu bar, and its row says why
   and when the next try is. *Retry Now* skips the wait.
 
@@ -185,6 +198,8 @@ server is touched. On the server itself, `install.sh --uninstall` (or
 ## Building from source
 
 Needs Xcode 26 or later, [XcodeGen](https://github.com/yonaskolb/XcodeGen) and Go 1.24 or later.
+(Without Go, a build keeps the Linux and Windows agents already in
+`build/agents` rather than rebuilding them — enough to work on the Mac app.)
 
 ```bash
 Scripts/build.sh            # agents and app, into dist/

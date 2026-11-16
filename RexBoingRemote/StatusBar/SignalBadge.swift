@@ -5,13 +5,19 @@ import RexBoingKit
 /// two arcs, the app icon's own, so a Remote rex never passes for one of Rex
 /// Boing's when both apps sit side by side.
 ///
+/// Live, it is drawn in Remote's violet. A grey mark six points wide beside
+/// a grey rex was a difference that had to be looked for; a coloured one is
+/// seen from the other side of the bar, the way an orange dot in the Wi-Fi
+/// menu is — and it doubles as the status light: violet while the server
+/// answers, all but gone when it does not.
+///
 /// It has a column of its own between the character and the readout rather
 /// than a corner of the character's box: across the sixteen characters,
 /// over their cycles and loads, there is no corner of that box that one of
 /// them does not draw in.
 @MainActor
 enum SignalBadge {
-    static let width: CGFloat = 6
+    static let width: CGFloat = 8
 
     /// The item's layout with the badge's column after the character.
     static func layout(cells: [ReadoutCell]) -> StatusBarRenderer.Layout {
@@ -25,20 +31,23 @@ enum SignalBadge {
     /// whose units are points with the origin at the bottom left. Offline,
     /// the arcs all but go, as a Wi-Fi menu does with no signal.
     static func draw(in context: CGContext, layout: StatusBarRenderer.Layout, ink: NSColor, live: Bool) {
-        let rgb = ink.usingColorSpace(.deviceRGB) ?? NSColor(deviceWhite: 1, alpha: 1)
-        let dot = CGPoint(x: layout.visual.maxX + 1.1, y: layout.size.height / 2 + 1.2)
+        // Resolved here, under whatever appearance the caller is drawing in:
+        // the menu bar's, which is not always the app's.
+        let mark = live ? Brand.ink : ink
+        let rgb = mark.usingColorSpace(.deviceRGB) ?? NSColor(deviceWhite: 1, alpha: 1)
+        let dot = CGPoint(x: layout.visual.maxX + 1.3, y: layout.size.height / 2 + 0.6)
 
         context.saveGState()
         defer { context.restoreGState() }
         context.setLineCap(.round)
-        context.setLineWidth(1.1)
+        context.setLineWidth(1.35)
         context.setStrokeColor(rgb.withAlphaComponent(rgb.alphaComponent * (live ? 1 : 0.25)).cgColor)
-        for radius in [CGFloat(2.6), 4.4] {
+        for radius in [CGFloat(3.0), 5.2] {
             context.addArc(center: dot, radius: radius, startAngle: .pi * 0.04, endAngle: .pi * 0.46, clockwise: false)
             context.strokePath()
         }
         context.setFillColor(rgb.cgColor)
-        context.fillEllipse(in: CGRect(x: dot.x - 0.95, y: dot.y - 0.95, width: 1.9, height: 1.9))
+        context.fillEllipse(in: CGRect(x: dot.x - 1.2, y: dot.y - 1.2, width: 2.4, height: 2.4))
     }
 
     /// Kit's readouts with the mark drawn in, as one image for the item's

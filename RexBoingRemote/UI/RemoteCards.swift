@@ -15,7 +15,7 @@ struct PressureCard: View {
             row("Memory", pressure.memory, full: pressure.memoryFull)
             row("Disk", pressure.io, full: pressure.ioFull)
             Text("Share of the last 10 seconds that work spent waiting.")
-                .font(.system(size: 9.5))
+                .dashFont(9.5)
                 .foregroundStyle(.tertiary)
         }
     }
@@ -31,7 +31,7 @@ struct PressureCard: View {
                     .foregroundStyle(Severity.load(min(1, value * 4)).swiftUIColor)
                 if let full, full > 0 {
                     Text("· all \(Format.percent(full / 100, decimals: 1))")
-                        .font(.system(size: 9.5))
+                        .dashFont(9.5)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -77,13 +77,13 @@ struct SystemCard: View {
             }
             if let kernel = hello?.host?.kernel {
                 Text(kernel)
-                    .font(.system(size: 9.5, design: .monospaced))
+                    .dashFont(9.5, design: .monospaced)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             if let agent = hello?.agent?.version {
                 Text("agent \(agent)")
-                    .font(.system(size: 9.5))
+                    .dashFont(9.5)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -117,7 +117,7 @@ struct GPUDetailCard: View {
             ForEach(Array(gpus.enumerated()), id: \.offset) { _, gpu in
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text(gpu.name ?? "GPU").font(.system(size: 11, weight: .medium))
+                        Text(gpu.name ?? "GPU").dashFont(11, weight: .medium)
                         Spacer()
                         Text(Format.percent(gpu.utilization ?? 0)).metricValue(size: 11, weight: .semibold)
                             .foregroundStyle(Palette.gpu)
@@ -125,9 +125,9 @@ struct GPUDetailCard: View {
                     if let engines = gpu.engines, !engines.isEmpty {
                         ForEach(engines.sorted(by: { $0.key < $1.key }), id: \.key) { name, value in
                             HStack(spacing: 8) {
-                                Text(name.capitalized).metricLabel().frame(width: 80, alignment: .leading)
+                                Text(name.capitalized).metricLabel().dashFrame(width: 80, alignment: .leading)
                                 MiniBar(fraction: value, accent: Palette.gpu, height: 3)
-                                Text(Format.percent(value)).metricValue(size: 10).frame(width: 38, alignment: .trailing)
+                                Text(Format.percent(value)).metricValue(size: 10).dashFrame(width: 38, alignment: .trailing)
                             }
                         }
                     }
@@ -159,11 +159,11 @@ struct VolumesCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(volume.name ?? volume.mount ?? "?")
-                            .font(.system(size: 10.5, design: .monospaced))
+                            .dashFont(10.5, design: .monospaced)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         if let fs = volume.fs {
-                            Text(fs).font(.system(size: 9)).foregroundStyle(.tertiary)
+                            Text(fs).dashFont(9).foregroundStyle(.tertiary)
                         }
                         Spacer()
                         Text("\(Format.diskBytes(volume.available ?? 0)) free of \(Format.diskBytes(volume.total ?? 0))")
@@ -186,7 +186,7 @@ struct NoticesCard: View {
         Card(accent: .secondary, title: "Tips from the agent", symbol: "lightbulb") {
             ForEach(notices.sorted(by: { $0.key < $1.key }), id: \.key) { _, message in
                 Text(message)
-                    .font(.system(size: 10.5))
+                    .dashFont(10.5)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
