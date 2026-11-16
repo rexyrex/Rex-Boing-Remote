@@ -6,8 +6,26 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION=$(cat VERSION)
 OUT=build/agents
+TARGETS="linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64"
+
+# Checked before anything is removed: without Go this used to delete the
+# agents already built and then stop, leaving a checkout that could not build
+# the app at all. A Mac with no Go keeps the agents it has — enough to work
+# on the app — and is told so; a release always has Go (release.sh tests the
+# agent with it before it gets here).
+if ! command -v go >/dev/null 2>&1; then
+    for target in $TARGETS; do
+        if [ -z "$(ls -A "$OUT/${target%/*}-${target#*/}" 2>/dev/null)" ]; then
+            echo "Go is required to build the Linux and Windows agents: brew install go" >&2
+            exit 1
+        fi
+    done
+    echo "warning: go not found; keeping the agents already in $OUT, whatever source they were built from" >&2
+    exit 0
+fi
+
 rm -rf "$OUT"
-for target in linux/amd64 linux/arm64 linux/arm windows/amd64 windows/arm64; do
+for target in $TARGETS; do
     os=${target%/*}
     arch=${target#*/}
     name=rex-boing-agent
