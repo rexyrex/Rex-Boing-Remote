@@ -739,6 +739,88 @@ struct ConnectionCheck {
                   && resumed.medium.points.last?.t == windowEnd && resumed.coarse.points.last?.t == windowEnd,
                   "the first sample after an agent's record keeps all of it (\(resumed.medium.points.count) half-minutes after "
                   + "\(merged.0.count), \(resumed.coarse.points.count) five-minute points after \(merged.1.count))")
+
+            // What processes used over each quarter hour: the macOS agent
+            // works it out by the same rules, and to the same numbers, as
+            // the Go agent's golden usage.
+            var usageRings = HistoryRings(interval: 2, started: base)
+            usageRings.tracksUsage = true
+            usageRings.setKeepDays(7, now: base)
+            func usageRow(_ pid: Int32, _ name: String, _ user: String, cpu: Double, memory: UInt64, start: UInt64? = nil,
+                          cmd: String? = nil, read: Double? = nil, write: Double? = nil, gpu: Double? = nil) -> WireProcessRow {
+                var row = WireProcessRow()
+                row.pid = pid; row.name = name; row.user = user; row.cpu = cpu; row.memory = memory
+                row.start = start; row.cmd = cmd; row.diskRead = read; row.diskWrite = write; row.gpu = gpu
+                return row
+            }
+            let scans: [[WireProcessRow]] = [
+                [usageRow(7, "rsync", "alex", cpu: 80.5, memory: 5_000_000, start: 1_792_000_000_000_000, cmd: "rsync -a /srv /backup",
+                          read: 4e6, write: 1e6),
+                 usageRow(9, "postgres", "postgres", cpu: 2, memory: 900_000_000),
+                 usageRow(11, "ffmpeg", "alex", cpu: 390, memory: 300_000_000, gpu: 40)],
+                [usageRow(7, "rsync", "alex", cpu: 60, memory: 6_000_000, start: 1_792_000_000_000_000, cmd: "rsync -a /srv /backup",
+                          read: 2e6),
+                 usageRow(9, "postgres", "postgres", cpu: 4, memory: 910_000_000, write: 3e5)],
+                [usageRow(9, "postgres", "postgres", cpu: 1, memory: 900_000_000),
+                 usageRow(12, "sh", "alex", cpu: 0, memory: 0, cmd: "sh -c true")],
+                [usageRow(9, "postgres", "postgres", cpu: 3, memory: 900_000_000)],
+            ]
+            for (index, rows) in scans.enumerated() {
+                var table = WireProcesses()
+                table.count = 200
+                table.sampledAt = Int64(base.timeIntervalSince1970 * 1000) + (index == 3 ? 960_000 : Int64(100 + index * 15) * 1000)
+                table.interval = 15
+                table.rows = rows
+                usageRings.add(processes: table)
+            }
+            let usageURL = goldenURL.deletingLastPathComponent().appendingPathComponent("usage.json")
+            let exported = try? JSONSerialization.jsonObject(with: usageRings.exported()) as? NSDictionary
+            let goldenUsage = (try? Data(contentsOf: usageURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? NSArray }
+            let mineUsage = exported?["usage"] as? NSArray
+            check(goldenUsage != nil && mineUsage == goldenUsage && exported?["keepDays"] as? Int == 7,
+                  "the Swift rings work out per-process usage as the Go agent does")
+            if mineUsage != goldenUsage, let mineUsage {
+                print(String(decoding: try! JSONSerialization.data(withJSONObject: mineUsage, options: [.sortedKeys]), as: UTF8.self))
+            }
+            // Usage survives a restart mid-window; the app is sent none.
+            var reloaded = HistoryRings(interval: 2, started: base)
+            reloaded.tracksUsage = true
+            reloaded.setKeepDays(7, now: base)
+            if let wire = try? JSONDecoder().decode(WireHistory.self, from: usageRings.exported()) {
+                reloaded.load(wire, now: base.addingTimeInterval(970))
+            }
+            let reloadedUsage = (try? JSONSerialization.jsonObject(with: reloaded.exported()) as? NSDictionary)?["usage"] as? NSArray
+            let appWire = try? JSONSerialization.jsonObject(with: usageRings.encoded()) as? NSDictionary
+            check(reloadedUsage == mineUsage && appWire?["usage"] == nil && appWire?["keepDays"] == nil,
+                  "usage loads back, open window included, and stays out of what the app is sent")
+
+            // A long retention keeps more than the app is sent: the app
+            // still gets 48 hours of vitals and 24 of process tables.
+            var long = HistoryRings(interval: 60, started: base)
+            long.tracksUsage = true
+            long.setKeepDays(7, now: base)
+            for minute in 1...(4 * 24 * 60) {
+                var point = HistoryPoint(t: Int64(base.timeIntervalSince1970 * 1000) + Int64(minute) * 60_000)
+                point[.cpu] = 0.3
+                long.add(point)
+                if minute % 15 == 0 {
+                    var table = WireProcesses()
+                    table.count = 1
+                    table.sampledAt = point.t
+                    table.interval = 15
+                    table.rows = [usageRow(9, "postgres", "postgres", cpu: 3, memory: 900)]
+                    long.add(processes: table)
+                }
+            }
+            let lastMS = Int64(base.timeIntervalSince1970 * 1000) + 4 * 24 * 3_600_000
+            let sent = try? JSONDecoder().decode(WireHistory.self, from: long.encoded())
+            let sentCoarse = sent?.tiers?.last?.t ?? []
+            let sentTables = sent?.processes ?? []
+            check(lastMS - (long.coarse.points.first?.t ?? lastMS) > 90 * 3_600_000
+                  && lastMS - (sentCoarse.first ?? 0) <= 48 * 3_600_000
+                  && lastMS - (sentTables.first?.sampledAt ?? 0) <= 24 * 3_600_000 && long.usage.count > 380,
+                  "seven days are kept, and the app is sent 48 hours (\(long.coarse.points.count) five-minute points kept, "
+                  + "\(sentCoarse.count) sent; \(long.processTables.count) tables kept, \(sentTables.count) sent)")
         } else {
             check(false, "agent/internal/history/testdata/history.json is readable")
         }

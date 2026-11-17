@@ -18,6 +18,15 @@ struct WireHistory: Codable, Sendable {
     var tiers: [Tier]?
     /// The busiest table of every quarter hour, oldest first.
     var processes: [WireProcesses]?
+    /// The retention, in days: in an export (everything kept), not in what
+    /// the app is sent.
+    var keepDays: Int?
+    /// The moments a `history --json` answer covers, milliseconds.
+    var from: Int64?
+    var to: Int64?
+    /// What processes used over every quarter hour, oldest first: in an
+    /// export only.
+    var usage: [WireUsage]?
 
     /// One ring, columnar: every series has one entry per time in `t`, null
     /// where that reading was not available. A series the machine never
@@ -84,6 +93,38 @@ struct WireHistory: Codable, Sendable {
             }
             return points
         }
+    }
+}
+
+/// What processes used over one quarter hour, from every process table read
+/// in it (PROTOCOL.md, "history", usage). CPU, disk and GPU are means over
+/// the `seconds` the scans covered; memory is the most seen at once.
+struct WireUsage: Codable, Sendable {
+    /// The end of the window, milliseconds since the epoch.
+    var end: Int64?
+    var seconds: Double?
+    var scans: Int?
+    /// How many processes were seen in the window.
+    var count: Int?
+    var rows: [Row]?
+    /// The leaders' pids by cpu, memory, disk and gpu, busiest first.
+    var rank: [String: [Int32]]?
+
+    struct Row: Codable, Sendable {
+        var pid: Int32?
+        var name: String?
+        var user: String?
+        /// Microseconds since the epoch.
+        var start: UInt64?
+        var cmd: String?
+        /// Percent of one core: the mean, and the most one scan measured.
+        var cpu, cpuPeak: Double?
+        var memory: UInt64?
+        /// Bytes per second.
+        var diskRead, diskWrite: Double?
+        var gpu: Double?
+        /// How many of the window's scans listed it.
+        var seen: Int?
     }
 }
 
@@ -216,7 +257,7 @@ struct HistoryTier: Sendable {
     /// Seconds each point covers; 0 for the finest tier, whose points are
     /// samples.
     let step: TimeInterval
-    let span: TimeInterval
+    var span: TimeInterval
     private(set) var points: [HistoryPoint] = []
 
     init(step: TimeInterval, span: TimeInterval) {
@@ -270,6 +311,29 @@ struct HistoryRings: Sendable {
     static let processSpan: TimeInterval = 24 * 3600
     static let processRows = 5
     static let maxCommand = 200
+    /// The retention without a setting, and the most a setting may keep
+    /// (PROTOCOL.md, "Background history").
+    static let defaultKeepDays = 2
+    static let maxKeepDays = 30
+    /// Bounds the processes one quarter hour's usage tracks.
+    static let maxUsageProcesses = 20000
+
+    /// The retention for a setting of `days`: the default (48 hours of
+    /// vitals, 24 of process records) for the default or less, otherwise
+    /// that many days of both.
+    static func retention(days: Int) -> (days: Int, vitals: TimeInterval, processes: TimeInterval) {
+        guard days > defaultKeepDays else { return (defaultKeepDays, coarseSpan, processSpan) }
+        let days = min(days, maxKeepDays)
+        return (days, Double(days) * 86400, Double(days) * 86400)
+    }
+
+    /// What a retention keeps, for messages.
+    static func retentionText(days: Int) -> String {
+        let days = retention(days: days).days
+        return days <= defaultKeepDays
+            ? "48 hours of vitals and 24 hours of process records"
+            : "\(days) days of vitals and process records"
+    }
 
     /// Seconds between the samples given to `add`.
     var interval: Double
@@ -287,9 +351,36 @@ struct HistoryRings: Sendable {
     private var processScore: Double = 0
     private var processEnd: Int64 = 0
 
+    /// The retention in days, and how far back process records go.
+    private(set) var keepDays = defaultKeepDays
+    private(set) var processKeep: TimeInterval = processSpan
+    /// Whether to work out what each process used over each quarter hour:
+    /// the background agent does; the app, which is sent none, need not.
+    var tracksUsage = false
+    private(set) var usage: [WireUsage] = []
+    private var open = UsageWindow()
+
     init(interval: Double, started: Date = Date()) {
         self.interval = interval
         self.started = Int64(started.timeIntervalSince1970 * 1000)
+    }
+
+    /// Changes the retention, dropping at once what a shorter one no longer
+    /// keeps.
+    mutating func setKeepDays(_ days: Int, now: Date = Date()) {
+        let keep = Self.retention(days: days)
+        keepDays = keep.days
+        processKeep = keep.processes
+        coarse.span = keep.vitals
+        let nowMS = Int64(now.timeIntervalSince1970 * 1000)
+        coarse.prune(now: nowMS)
+        pruneProcesses(now: nowMS)
+    }
+
+    private mutating func pruneProcesses(now ms: Int64) {
+        let cut = ms - Int64(processKeep * 1000)
+        processes.removeAll { ($0.sampledAt ?? 0) <= cut }
+        usage.removeAll { ($0.end ?? 0) <= cut }
     }
 
     /// Records one sample's vitals. Samples whose rates are not valid are
@@ -342,6 +433,7 @@ struct HistoryRings: Sendable {
         // and JSON could not carry it.
         guard let at = table.sampledAt, at > 0, let interval = table.interval, interval.isFinite, interval > 0,
               !(table.rows ?? []).isEmpty else { return }
+        if tracksUsage { addUsage(table, at: at, interval: interval) }
         if at < processEnd - Int64(Self.processStep * 1000) {
             processes.removeAll { ($0.sampledAt ?? 0) >= at }
             processBest = nil
@@ -358,8 +450,7 @@ struct HistoryRings: Sendable {
             processBest = Self.trim(table)
             processScore = score
         }
-        let cut = at - Int64(Self.processSpan * 1000)
-        processes.removeAll { ($0.sampledAt ?? 0) <= cut }
+        pruneProcesses(now: at)
     }
 
     /// A reading that is not a number, as 0.
@@ -449,26 +540,52 @@ struct HistoryRings: Sendable {
 
     // MARK: - Wire
 
-    func wire(includeProcesses: Bool = true, includeFine: Bool = true) -> WireHistory {
+    /// The newest time recorded, milliseconds, or 0.
+    private var latest: Int64 {
+        ([fine, medium, coarse].compactMap { $0.points.last?.t } + processTables.compactMap(\.sampledAt)).max() ?? 0
+    }
+
+    /// The history message: by default what the app is sent, the last 48
+    /// hours of vitals and 24 hours of process tables, however long the
+    /// retention; with `all`, everything kept, with the retention and the
+    /// usage (the open window's so far last).
+    func wire(includeProcesses: Bool = true, includeFine: Bool = true, all: Bool = false) -> WireHistory {
         var wire = WireHistory()
         wire.started = started
         wire.interval = interval
+        let latest = all ? 0 : latest
+        let vitalsCut = all ? Int64.min : latest - Int64(Self.coarseSpan * 1000)
+        let processCut = all ? Int64.min : latest - Int64(Self.processSpan * 1000)
         var tiers: [WireHistory.Tier] = []
         for tier in includeFine ? [fine, medium, coarse] : [medium, coarse] {
             var out = WireHistory.Tier(step: tier.step == 0 ? interval : tier.step)
-            out.t = tier.points.map(\.t)
-            for series in HistorySeries.allCases where tier.points.contains(where: { $0[series] != nil }) {
+            let points = tier.points.drop { $0.t <= vitalsCut }
+            out.t = points.map(\.t)
+            for series in HistorySeries.allCases where points.contains(where: { $0[series] != nil }) {
                 let scale = pow(10, Double(series.decimals))
-                out[series] = tier.points.map { point in point[series].map { ($0 * scale).rounded() / scale } }
+                out[series] = points.map { point in point[series].map { ($0 * scale).rounded() / scale } }
             }
             tiers.append(out)
         }
         wire.tiers = tiers
         if includeProcesses {
-            let tables = processTables
-            if !tables.isEmpty { wire.processes = tables }
+            let tables = processTables.drop { ($0.sampledAt ?? 0) <= processCut }
+            if !tables.isEmpty { wire.processes = Array(tables) }
+        }
+        if all {
+            wire.keepDays = keepDays
+            let usage = usage + (open.scans > 0 ? [open.summary] : [])
+            if !usage.isEmpty { wire.usage = usage }
         }
         return wire
+    }
+
+    /// Everything kept, as one JSON object: what the background agent
+    /// saves, and what its history command reads.
+    func exported() -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return (try? encoder.encode(wire(all: true))) ?? Data(#"{"type":"history"}"#.utf8)
     }
 
     /// The history message as one JSON line's bytes, kept under `maxLength`
@@ -485,8 +602,9 @@ struct HistoryRings: Sendable {
         return Data(#"{"type":"history"}"#.utf8)
     }
 
-    /// Restores rings an agent saved, dropping what has aged out since or
-    /// lies in the future. `started` keeps its own value.
+    /// Restores rings an agent saved, dropping what has aged out since
+    /// under this retention, or lies in the future. `started` and the
+    /// retention keep their own values.
     mutating func load(_ wire: WireHistory, now: Date = Date()) {
         let nowMS = Int64(now.timeIntervalSince1970 * 1000)
         for tier in wire.tiers ?? [] {
@@ -519,7 +637,7 @@ struct HistoryRings: Sendable {
         for point in saved where point.t > lastCoarse { Self.fold(point, into: &coarse, bucket: &coarseBucket) }
         medium.prune(now: nowMS)
         coarse.prune(now: nowMS)
-        let cut = nowMS - Int64(Self.processSpan * 1000)
+        let cut = nowMS - Int64(processKeep * 1000)
         var tables = (wire.processes ?? []).filter { ($0.sampledAt ?? 0) > cut && ($0.sampledAt ?? 0) <= nowMS }
         tables.sort { ($0.sampledAt ?? 0) < ($1.sampledAt ?? 0) }
         if let last = tables.popLast() {
@@ -528,6 +646,7 @@ struct HistoryRings: Sendable {
             processScore = Self.score(last.rows ?? [])
             processEnd = Self.bucketEnd(last.sampledAt ?? 0, step: Self.processStep)
         }
+        if tracksUsage { loadUsage(wire.usage ?? [], now: nowMS) }
     }
 
     /// Takes in what an agent kept: its points replace this side's over the
@@ -535,12 +654,154 @@ struct HistoryRings: Sendable {
     mutating func merge(_ wire: WireHistory, now: Date = Date()) {
         load(wire, now: now)
         let nowMS = Int64(now.timeIntervalSince1970 * 1000)
-        let cut = nowMS - Int64(Self.processSpan * 1000)
+        let cut = nowMS - Int64(processKeep * 1000)
         processes = (wire.processes ?? [])
             .filter { ($0.sampledAt ?? 0) > cut && ($0.sampledAt ?? 0) <= nowMS }
             .sorted { ($0.sampledAt ?? 0) < ($1.sampledAt ?? 0) }
         processBest = nil
         processEnd = 0
+    }
+
+    // MARK: - Usage
+
+    /// Folds one process table into the open quarter hour's usage.
+    private mutating func addUsage(_ table: WireProcesses, at: Int64, interval: Double) {
+        let end = Self.bucketEnd(at, step: Self.processStep)
+        if open.end != 0, end < open.end {
+            // The clock went back: drop the usage from the old timeline.
+            usage.removeAll { ($0.end ?? 0) >= end }
+            open = UsageWindow()
+        }
+        if open.end != 0, end != open.end {
+            usage.append(open.summary)
+            open = UsageWindow()
+        }
+        if open.end == 0 { open.end = end }
+        open.seconds += interval
+        open.scans += 1
+        for row in table.rows ?? [] {
+            let key = UsageKey(pid: row.pid ?? 0, start: row.start ?? 0)
+            var acc: UsageAcc
+            if let known = open.processes[key] {
+                acc = known
+            } else {
+                guard open.processes.count < Self.maxUsageProcesses else { continue }
+                acc = UsageAcc(name: row.name, user: row.user, cmd: row.cmd.map { Self.truncate($0, bytes: Self.maxCommand) })
+            }
+            let cpu = max(Self.finite(row.cpu), 0)
+            acc.cpu += cpu * interval
+            acc.cpuPeak = max(acc.cpuPeak, cpu)
+            acc.read += max(Self.finite(row.diskRead), 0) * interval
+            acc.write += max(Self.finite(row.diskWrite), 0) * interval
+            acc.gpu += max(Self.finite(row.gpu), 0) * interval
+            acc.memory = max(acc.memory, row.memory ?? 0)
+            acc.seen += 1
+            open.processes[key] = acc
+        }
+    }
+
+    /// Restores saved usage; a last entry for the window now open is that
+    /// window so far, and goes on collecting.
+    private mutating func loadUsage(_ saved: [WireUsage], now nowMS: Int64) {
+        usage = []
+        open = UsageWindow()
+        let cut = nowMS - Int64(processKeep * 1000)
+        let step = Int64(Self.processStep * 1000)
+        for entry in saved {
+            guard let end = entry.end, end > cut, end - step < nowMS, (entry.seconds ?? 0) > 0,
+                  end > (usage.last?.end ?? .min) else { continue }
+            usage.append(entry)
+        }
+        guard let last = usage.last, let end = last.end, end >= Self.bucketEnd(nowMS, step: Self.processStep) else { return }
+        usage.removeLast()
+        let seconds = last.seconds ?? 0
+        open = UsageWindow(end: end, seconds: seconds, scans: last.scans ?? 0)
+        for row in last.rows ?? [] {
+            var acc = UsageAcc(name: row.name, user: row.user, cmd: row.cmd)
+            acc.cpu = (row.cpu ?? 0) * seconds
+            acc.read = (row.diskRead ?? 0) * seconds
+            acc.write = (row.diskWrite ?? 0) * seconds
+            acc.gpu = (row.gpu ?? 0) * seconds
+            acc.cpuPeak = row.cpuPeak ?? 0
+            acc.memory = row.memory ?? 0
+            acc.seen = row.seen ?? 0
+            open.processes[UsageKey(pid: row.pid ?? 0, start: row.start ?? 0)] = acc
+        }
+    }
+
+    private struct UsageKey: Hashable, Sendable {
+        var pid: Int32
+        var start: UInt64
+    }
+
+    /// One process over a window: cpu, read, write and gpu are sums of
+    /// value × seconds.
+    private struct UsageAcc: Sendable {
+        var name, user, cmd: String?
+        var cpu = 0.0, read = 0.0, write = 0.0, gpu = 0.0, cpuPeak = 0.0
+        var memory: UInt64 = 0
+        var seen = 0
+    }
+
+    /// The quarter hour still open.
+    private struct UsageWindow: Sendable {
+        var end: Int64 = 0
+        var seconds = 0.0
+        var scans = 0
+        var processes: [UsageKey: UsageAcc] = [:]
+
+        /// The window's usage: the leaders by each measure, busiest by CPU
+        /// first. The same rules, and the same order, as the Go agent's.
+        var summary: WireUsage {
+            var out = WireUsage()
+            out.end = end
+            out.seconds = (seconds * 1000).rounded() / 1000
+            out.scans = scans
+            out.count = processes.count
+            out.rows = []
+            out.rank = [:]
+            guard seconds > 0 else { return out }
+            func round1(_ v: Double) -> Double { (v * 10).rounded() / 10 }
+            let all: [(key: UsageKey, row: WireUsage.Row)] = processes.map { key, acc in
+                var row = WireUsage.Row()
+                row.pid = key.pid
+                row.name = acc.name
+                row.user = acc.user
+                row.start = key.start == 0 ? nil : key.start
+                row.cmd = acc.cmd
+                row.cpu = round1(acc.cpu / seconds)
+                row.cpuPeak = round1(acc.cpuPeak)
+                row.memory = acc.memory
+                let read = (acc.read / seconds).rounded(), write = (acc.write / seconds).rounded(), gpu = round1(acc.gpu / seconds)
+                row.diskRead = read == 0 ? nil : read
+                row.diskWrite = write == 0 ? nil : write
+                row.gpu = gpu == 0 ? nil : gpu
+                row.seen = acc.seen
+                return (key, row)
+            }.sorted { ($0.key.pid, $0.key.start) < ($1.key.pid, $1.key.start) }
+            var keep = Set<UsageKey>()
+            let measures: [(String, (WireUsage.Row) -> Double)] = [
+                ("cpu", { $0.cpu ?? 0 }),
+                ("memory", { Double($0.memory ?? 0) }),
+                ("disk", { ($0.diskRead ?? 0) + ($0.diskWrite ?? 0) }),
+                ("gpu", { $0.gpu ?? 0 }),
+            ]
+            for (name, value) in measures {
+                let leaders = all.indices
+                    .sorted { value(all[$0].row) != value(all[$1].row) ? value(all[$0].row) > value(all[$1].row) : $0 < $1 }
+                    .prefix(while: { value(all[$0].row) > 0 })
+                    .prefix(HistoryRings.processRows)
+                guard !leaders.isEmpty else { continue }
+                out.rank?[name] = leaders.compactMap { all[$0].row.pid }
+                for index in leaders { keep.insert(all[index].key) }
+            }
+            let kept = all.enumerated().filter { keep.contains($0.element.key) }
+            out.rows = kept.sorted {
+                let (a, b) = ($0.element.row.cpu ?? 0, $1.element.row.cpu ?? 0)
+                return a != b ? a > b : $0.offset < $1.offset
+            }.map(\.element.row)
+            return out
+        }
     }
 
     /// One point per window: the mean of each value over the fine points

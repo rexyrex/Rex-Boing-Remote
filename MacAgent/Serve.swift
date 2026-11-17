@@ -10,11 +10,52 @@ enum Background {
     static let defaultInterval = 2.0
     static let processEvery: TimeInterval = 15
     static let saveEvery: TimeInterval = 10 * 60
+    /// A retention longer than a week makes a file of several megabytes,
+    /// written less often.
+    static let saveLongEvery: TimeInterval = 30 * 60
+    static let longSaveAfter = 7
     static let maxLine = 1 << 20
+    /// Bounds the answer to an export request: local only, everything kept.
+    static let maxExport = 512 << 20
     static let maxRequest = 4 << 10
     static let maxClients = 8
 
     static var historyFile: String { Manage.installDir + "/history.json" }
+    static var settingsFile: String { Manage.installDir + "/history-settings.json" }
+
+    private struct Settings: Codable { var keepDays: Int }
+
+    /// The retention setting: the default without a file.
+    static var keepDays: Int {
+        guard let data = FileManager.default.contents(atPath: settingsFile),
+              let settings = try? JSONDecoder().decode(Settings.self, from: data) else { return HistoryRings.defaultKeepDays }
+        return HistoryRings.retention(days: settings.keepDays).days
+    }
+
+    /// Saves the retention setting through a temporary file; the default
+    /// is no file at all.
+    static func saveKeepDays(_ days: Int) -> Bool {
+        let days = HistoryRings.retention(days: days).days
+        guard days != HistoryRings.defaultKeepDays else {
+            return unlink(settingsFile) == 0 || errno == ENOENT
+        }
+        guard let data = try? JSONEncoder().encode(Settings(keepDays: days)) else { return false }
+        return writeAtomically(data + [0x0A], to: settingsFile)
+    }
+
+    /// Writes through a temporary file, so a crash or a power cut leaves the
+    /// old file or the new one, never half of one. Mode 0600.
+    static func writeAtomically(_ data: Data, to path: String) -> Bool {
+        let temp = path + ".\(getpid()).tmp"
+        guard FileManager.default.createFile(atPath: temp, contents: data, attributes: [.posixPermissions: 0o600]) else { return false }
+        let fd = open(temp, O_RDONLY)
+        if fd >= 0 { fsync(fd); close(fd) }
+        guard rename(temp, path) == 0 else {
+            unlink(temp)
+            return false
+        }
+        return true
+    }
 
     /// <install dir>/run/serve.sock, or, when a long home directory makes
     /// that too long for a socket address, a directory in this user's own
@@ -66,6 +107,10 @@ enum Background {
     /// Sends one request to this user's running serve and returns its
     /// one-line answer, or nil when none answers within `timeout`.
     static func ask(_ want: String, timeout: TimeInterval) -> Data? {
+        ask(request: #"{"want":"\#(want)"}"#, limit: maxLine, timeout: timeout)
+    }
+
+    static func ask(request: String, limit: Int, timeout: TimeInterval) -> Data? {
         guard privateDirectory(runDirectory, create: false) else { return nil }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -74,9 +119,8 @@ enum Background {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         setTimeouts(fd, timeout)
         guard connect(fd, path: socketPath) else { return nil }
-        let request = Data(#"{"want":"\#(want)"}"#.utf8 + [0x0A])
-        guard writeAll(fd, request) else { return nil }
-        guard var line = readLine(fd, limit: maxLine) else { return nil }
+        guard writeAll(fd, Data(request.utf8 + [0x0A])) else { return nil }
+        guard var line = readLine(fd, limit: limit) else { return nil }
         if line.last == 0x0A { line.removeLast() }
         return line
     }
@@ -96,12 +140,28 @@ enum Background {
         var version: String
         var started: Int64
         var interval: Double
+        var keepDays: Int?
         var oldest: Int64?
         var endpoint: String
     }
 
     static func status(timeout: TimeInterval = 2) -> Status? {
         guard let data = ask("status", timeout: timeout) else { return nil }
+        return try? JSONDecoder().decode(Status.self, from: data)
+    }
+
+    /// Everything the running serve keeps, or nil when none answers.
+    static func export(timeout: TimeInterval = 10) -> Data? {
+        guard let data = ask(request: #"{"want":"export"}"#, limit: maxExport, timeout: timeout) else { return nil }
+        struct Head: Decodable { var type: String? }
+        guard (try? JSONDecoder().decode(Head.self, from: data))?.type == "history" else { return nil }
+        return data
+    }
+
+    /// Tells the running serve to keep `days` from now on; its status, or
+    /// nil when none answers. The caller saves the setting.
+    static func retain(days: Int, timeout: TimeInterval = 10) -> Status? {
+        guard let data = ask(request: #"{"want":"retention","days":\#(days)}"#, limit: maxLine, timeout: timeout) else { return nil }
         return try? JSONDecoder().decode(Status.self, from: data)
     }
 
@@ -201,6 +261,8 @@ final class BackgroundServer: @unchecked Sendable {
     init(interval: Double) {
         self.interval = interval
         rings = HistoryRings(interval: interval)
+        rings.tracksUsage = true
+        rings.setKeepDays(Background.keepDays)
     }
 
     static func run(interval requested: Double) -> Never {
@@ -228,7 +290,8 @@ final class BackgroundServer: @unchecked Sendable {
         server.handleSignals()
         server.queue.async { server.schedule() }
         Thread.detachNewThread { server.acceptLoop() }
-        FileHandle.standardError.write(Data("rex-boing-agent: keeping history every \(interval) s, on \(Background.socketPath)\n".utf8))
+        FileHandle.standardError.write(Data(("rex-boing-agent: keeping \(server.rings.keepDays) days of history, sampling every "
+            + "\(interval) s, on \(Background.socketPath)\n").utf8))
         dispatchMain()
     }
 
@@ -307,7 +370,8 @@ final class BackgroundServer: @unchecked Sendable {
             lastProcessScan = Date()
             rings.add(processes: table)
         }
-        if Date().timeIntervalSince(lastSave) >= Background.saveEvery {
+        let every = rings.keepDays > Background.longSaveAfter ? Background.saveLongEvery : Background.saveEvery
+        if Date().timeIntervalSince(lastSave) >= every {
             lastSave = Date()
             save()
         }
@@ -316,13 +380,7 @@ final class BackgroundServer: @unchecked Sendable {
     /// Writes the rings through a temporary file, so a crash or a power cut
     /// leaves the old file or the new one, never half of one.
     func save() {
-        let data = rings.encoded(maxLength: .max)
-        let path = Background.historyFile
-        let temp = path + ".\(getpid()).tmp"
-        guard FileManager.default.createFile(atPath: temp, contents: data, attributes: [.posixPermissions: 0o600]) else { return }
-        let fd = open(temp, O_RDONLY)
-        if fd >= 0 { fsync(fd); close(fd) }
-        if rename(temp, path) != 0 { unlink(temp) }
+        _ = Background.writeAtomically(rings.exported(), to: Background.historyFile)
     }
 
     func acceptLoop() {
@@ -358,27 +416,41 @@ final class BackgroundServer: @unchecked Sendable {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         Background.setTimeouts(fd, 2)
         guard let line = Background.readLine(fd, limit: Background.maxRequest) else { return }
-        struct Request: Decodable { var want: String? }
-        let want = (try? JSONDecoder().decode(Request.self, from: line))?.want
+        struct Request: Decodable { var want: String?; var days: Int? }
+        let request = try? JSONDecoder().decode(Request.self, from: line)
         var answer: Data
         var stopping = false
-        switch want {
-        case "history":
-            answer = queue.sync { rings.encoded(maxLength: Background.maxLine - 1) }
-        case "status":
+        func status() -> Data {
             let status = queue.sync {
                 Background.Status(pid: getpid(), version: agentVersion, started: rings.started, interval: interval,
-                                  oldest: rings.oldest.map { Int64($0.timeIntervalSince1970 * 1000) },
+                                  keepDays: rings.keepDays, oldest: rings.oldest.map { Int64($0.timeIntervalSince1970 * 1000) },
                                   endpoint: Background.socketPath)
             }
-            answer = (try? JSONEncoder().encode(status)) ?? Data()
+            return (try? JSONEncoder().encode(status)) ?? Data()
+        }
+        switch request?.want {
+        case "history":
+            answer = queue.sync { rings.encoded(maxLength: Background.maxLine - 1) }
+        case "export":
+            answer = queue.sync { rings.exported() }
+        case "retention":
+            // The settings file is the caller's to write; this applies it
+            // now, and saves, so a shorter retention is not undone by a
+            // crash.
+            queue.sync {
+                rings.setKeepDays(request?.days ?? HistoryRings.defaultKeepDays)
+                save()
+            }
+            answer = status()
+        case "status":
+            answer = status()
         case "stop":
             answer = Data(#"{"type":"stopping"}"#.utf8)
             stopping = true
         default:
             answer = Data(#"{"type":"error","message":"unknown request"}"#.utf8)
         }
-        Background.setTimeouts(fd, 10)
+        Background.setTimeouts(fd, 30)
         guard Background.writeAll(fd, answer + [0x0A]) else { return }
         var scratch = [UInt8](repeating: 0, count: 512)
         while read(fd, &scratch, scratch.count) > 0 {}

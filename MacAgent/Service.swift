@@ -87,7 +87,8 @@ enum LaunchAgent {
         let interval = String(format: "%g", status.interval)
         return ManageResult(
             ok: true,
-            message: "Keeping history: the agent samples every \(interval) s in the background and keeps 48 hours, "
+            message: "Keeping history: the agent samples every \(interval) s in the background and keeps "
+                + "\(HistoryRings.retentionText(days: status.keepDays ?? HistoryRings.defaultKeepDays)), "
                 + "as the LaunchAgent \(label). macOS starts it again whenever \(NSUserName()) logs in.",
             details: ["manager": "launchd", "plist": plistPath, "domain": domain, "interval": interval])
     }
@@ -103,6 +104,7 @@ enum LaunchAgent {
         }
         let stopped = Background.stop()
         try? FileManager.default.removeItem(atPath: Background.historyFile)
+        try? FileManager.default.removeItem(atPath: Background.settingsFile)
         Background.removeTemporaryRunDirectory()
         if hadPlist {
             return ManageResult(ok: true, message: "History is off: the LaunchAgent and the history it kept were removed.",

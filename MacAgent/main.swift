@@ -24,6 +24,9 @@ func usage() -> Never {
           rex-boing-agent serve [--interval S]    keep history in the background (optional)
           rex-boing-agent install-service         run serve as a LaunchAgent, now and at every login
           rex-boing-agent uninstall-service       stop it and delete the history it kept
+          rex-boing-agent retention [--days N]    show or set how many days of history to keep (2–30)
+          rex-boing-agent history [--from T] [--to T] [--at T] [--json] [--utc]
+                                                  what the machine and its processes did then
 
         """.utf8))
     exit(2)
@@ -99,6 +102,12 @@ func run(_ args: [String]) -> Never {
         let result = LaunchAgent.uninstall()
         printJSON(result)
         exit(result.ok ? 0 : 1)
+    case "retention":
+        let result = retention(rest)
+        printJSON(result)
+        exit(result.ok ? 0 : 1)
+    case "history":
+        exit(HistoryCommand.run(rest))
     case "ssh":
         // The restricted key's forced command: only these, in exactly these
         // forms, whatever the client asked for.
@@ -106,13 +115,43 @@ func run(_ args: [String]) -> Never {
         let words = original.split(whereSeparator: \.isWhitespace).map(String.init)
         guard allowedOverSSH(words) else {
             FileHandle.standardError.write(Data(("This key can only run the Rex Boing Remote agent (allowed: stream, version, doctor, "
-                + "doctor --json, upgrade, uninstall, pair-code, install-service, uninstall-service).\n").utf8))
+                + "doctor --json, upgrade, uninstall, pair-code, install-service, uninstall-service, retention, "
+                + "retention --days N).\n").utf8))
             exit(1)
         }
         run(words)
     default:
         usage()
     }
+}
+
+/// Shows or sets how much history the background agent keeps: a file in the
+/// install directory, which a running serve applies at once.
+func retention(_ args: [String]) -> ManageResult {
+    guard args.contains("--days") else {
+        guard args.isEmpty else { return ManageResult(ok: false, error: "usage", message: "Usage: rex-boing-agent retention [--days N]") }
+        let days = Background.keepDays
+        return ManageResult(ok: true, message: "The background agent keeps \(HistoryRings.retentionText(days: days)).",
+                            details: ["keepDays": String(days), "running": Background.status() == nil ? "no" : "yes"])
+    }
+    guard args.count == 2, let days = option("--days", in: args).flatMap(Int.init),
+          days >= HistoryRings.defaultKeepDays, days <= HistoryRings.maxKeepDays else {
+        return ManageResult(ok: false, error: "usage", message: "--days must be between \(HistoryRings.defaultKeepDays) and \(HistoryRings.maxKeepDays).")
+    }
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: Manage.installDir, isDirectory: &isDirectory), isDirectory.boolValue else {
+        return ManageResult(ok: false, error: "not-installed",
+                            message: "The agent is not installed in \(Manage.installDir) yet. Add this Mac in Rex Boing Remote first.")
+    }
+    guard Background.saveKeepDays(days) else {
+        return ManageResult(ok: false, error: "save-failed", message: "Cannot save the setting in \(Background.settingsFile).")
+    }
+    let text = HistoryRings.retentionText(days: days)
+    if Background.retain(days: days) != nil {
+        return ManageResult(ok: true, message: "Keeping \(text) from now on.", details: ["keepDays": String(days), "running": "yes"])
+    }
+    return ManageResult(ok: true, message: "The background agent will keep \(text) when it runs (it is not running now).",
+                        details: ["keepDays": String(days), "running": "no"])
 }
 
 /// Whether the restricted key may run this command line: the same list,
@@ -124,6 +163,11 @@ func allowedOverSSH(_ words: [String]) -> Bool {
         return words.count == 1
     case "doctor":
         return words.count == 1 || words == ["doctor", "--json"]
+    case "retention":
+        // Only these two forms; the command checks the range itself.
+        if words.count == 1 { return true }
+        guard words.count == 3, words[1] == "--days", let days = Int(words[2]) else { return false }
+        return days > 0 && days < 1000 && String(days) == words[2]
     case "upgrade":
         guard words.count == 5 else { return false }
         let flags = Dictionary([(words[1], words[2]), (words[3], words[4])], uniquingKeysWith: { first, _ in first })
@@ -370,7 +414,8 @@ extension Doctor {
         formatter.dateFormat = "MMM d HH:mm"
         if let status = Background.status() {
             var detail = "running (pid \(status.pid), since \(formatter.string(from: Date(timeIntervalSince1970: Double(status.started) / 1000))), "
-                + "sampling every \(String(format: "%g", status.interval)) s)"
+                + "sampling every \(String(format: "%g", status.interval)) s, "
+                + "keeping \(HistoryRings.retentionText(days: status.keepDays ?? HistoryRings.defaultKeepDays)))"
             if let oldest = status.oldest {
                 detail += "; history back to \(formatter.string(from: Date(timeIntervalSince1970: Double(oldest) / 1000)))"
             }
