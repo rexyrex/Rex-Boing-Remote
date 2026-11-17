@@ -137,6 +137,9 @@ private struct ServerDetail: View {
             }
             if let connection = fleet.connection(server.id) {
                 BackgroundToggle(server: server, connection: connection, enabled: !setup.isRunning) { setBackground($0) }
+                if server.keepHistory == true {
+                    RetentionPicker(server: server, enabled: !setup.isRunning) { setRetention($0) }
+                }
             }
             LabeledContent("Agent", value: agentLine)
             HStack {
@@ -188,12 +191,39 @@ private struct ServerDetail: View {
         message = nil
         Task {
             do {
-                let (text, upgraded) = try await setup.setBackgroundHistory(server, enabled: enabled)
+                let (reply, upgraded) = try await setup.setBackgroundHistory(server, enabled: enabled)
+                var text = reply
                 store.update(server.id) {
                     $0.keepHistory = enabled
                     if upgraded { $0.agentVersion = BundledAgent.version }
                 }
+                // Turning history off deleted the server's setting with the
+                // history: put the user's choice back.
+                if enabled, let days = server.historyDays, days > RetentionPicker.defaultDays {
+                    let (retained, alsoUpgraded) = try await setup.setHistoryRetention(server, days: days)
+                    text += " " + retained
+                    if alsoUpgraded { store.update(server.id) { $0.agentVersion = BundledAgent.version } }
+                }
                 fleet.connection(server.id)?.restart()
+                message = text
+            } catch {
+                message = (error as? Setup.Failure).map { [$0.message, $0.detail].compactMap { $0 }.joined(separator: "\n") }
+                    ?? error.localizedDescription
+            }
+        }
+    }
+
+    /// Changes how many days the agent keeps on the server.
+    private func setRetention(_ days: Int) {
+        message = nil
+        Task {
+            do {
+                let (text, upgraded) = try await setup.setHistoryRetention(server, days: days)
+                store.update(server.id) {
+                    $0.historyDays = days > RetentionPicker.defaultDays ? days : nil
+                    if upgraded { $0.agentVersion = BundledAgent.version }
+                }
+                if upgraded { fleet.connection(server.id)?.restart() }
                 message = text
             } catch {
                 message = (error as? Setup.Failure).map { [$0.message, $0.detail].compactMap { $0 }.joined(separator: "\n") }
@@ -246,7 +276,7 @@ private struct BackgroundToggle: View {
     }
 
     private var caption: String {
-        var text = "The agent keeps sampling on the server, 48 hours deep, as a service of your user there "
+        var text = "The agent keeps sampling on the server as a service of your user there "
             + "(\(manager)). It opens no port. Turning it off deletes what it kept."
         switch connection.background {
         case .running(let since):
@@ -267,6 +297,49 @@ private struct BackgroundToggle: View {
         case "windows": return "a scheduled task at sign-in"
         default: return "a systemd user service"
         }
+    }
+}
+
+/// How long the agent keeps history on the server. The History card shows
+/// the last 48 hours whatever this is; the rest is there to ask the server
+/// about (`rex-boing-agent history`).
+struct RetentionPicker: View {
+    static let defaultDays = 2
+    static let choices = [2, 7, 14, 30]
+
+    var server: Server
+    var enabled: Bool
+    var set: (Int) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Keep on the server", selection: Binding(get: { days }, set: { if $0 != days { set($0) } })) {
+                ForEach(Self.choices, id: \.self) { days in
+                    Text(days == Self.defaultDays ? "48 hours" : "\(days) days").tag(days)
+                }
+            }
+            .disabled(!enabled)
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var days: Int { server.historyDays ?? Self.defaultDays }
+
+    /// The agent's path on the server, from the home directory.
+    private var agentPath: String {
+        server.isWindows ? server.remoteAgentPath : server.remoteAgentPath.replacingOccurrences(of: "./", with: "~/", options: .anchored)
+    }
+
+    private var caption: String {
+        let size = days == Self.defaultDays ? "under 1 MB" : "about \(max(1, Int((Double(days) * 0.75).rounded()))) MB"
+        return "Vitals and what each process used every quarter hour, \(size) on the server. The History card shows "
+            + "the last 48 hours. To ask about any of it, run this on the server, or have an agent run it: "
+            + "\(agentPath) history --at 03:00 (or --from 3d --json). "
+            + "A shorter time deletes what is older at once."
     }
 }
 

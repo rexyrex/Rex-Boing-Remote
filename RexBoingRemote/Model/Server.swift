@@ -29,6 +29,9 @@ struct Server: Codable, Identifiable, Hashable, Sendable {
     /// while this Mac is away (a background service there). Optional so
     /// lists saved before it existed still load.
     var keepHistory: Bool?
+    /// How many days of history the agent keeps on the server (its
+    /// `retention`), when the user chose more than the default.
+    var historyDays: Int?
 
     var pinned = false
     var character: Visualizer = .rex
@@ -109,6 +112,7 @@ extension Server {
         arch = optional(String.self, .arch)
         agentVersion = optional(String.self, .agentVersion)
         keepHistory = optional(Bool.self, .keepHistory)
+        historyDays = optional(Int.self, .historyDays)
         pinned = optional(Bool.self, .pinned) ?? pinned
         character = optional(String.self, .character).flatMap(Visualizer.init(rawValue:)) ?? character
         readout = optional(String.self, .readout).flatMap(Readout.init(rawValue:)) ?? readout

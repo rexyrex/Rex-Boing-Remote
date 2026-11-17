@@ -337,6 +337,42 @@ final class Setup: ObservableObject {
         return (parsed.message ?? (enabled ? "Keeping history." : "History is off."), upgraded)
     }
 
+    /// Sets how many days of history the agent keeps on a server
+    /// (`retention --days N`), through the same key the stream uses. An
+    /// agent too old to know the command is updated first (when it was set
+    /// up with the app's key). Returns the agent's own explanation.
+    func setHistoryRetention(_ server: Server, days: Int) async throws -> (message: String, upgraded: Bool) {
+        if Demo.isActive { throw Failure(message: Demo.setupRefusal) }
+        isRunning = true
+        defer { isRunning = false }
+        let command = "retention --days \(days)"
+        let target = SSH.Target.forServer(server)
+        func run() async -> Run.Result {
+            await Run.async(
+                SSH.ssh,
+                SSH.background(target, auth: server.auth, avoidAgent: server.auth == .appKey)
+                    + (server.auth == .appKey ? [command] : [server.remoteAgentPath + " " + command]),
+                environment: SSH.backgroundEnvironment(), timeout: 60)
+        }
+        var result = await run()
+        var upgraded = false
+        if Self.result(result.stdout) == nil, Self.refusedAsUnknown(result.stderr) {
+            guard server.auth == .appKey else {
+                throw Failure(message: "This server's agent is too old to keep more than 48 hours. Use Repair to update it, then try again.")
+            }
+            try await upgrade(server)
+            upgraded = true
+            result = await run()
+        }
+        guard let parsed = Self.result(result.stdout) else {
+            throw Failure(message: "The server didn't answer.", detail: ServerConnection.explain(stderr: result.stderr, status: result.status))
+        }
+        guard parsed.ok else {
+            throw Failure(message: parsed.message ?? "The server couldn't change how much history it keeps.")
+        }
+        return (parsed.message ?? "Keeping \(days) days.", upgraded)
+    }
+
     /// Whether an agent refused a command because it does not know it:
     /// its forced-command check, or its own usage message.
     static func refusedAsUnknown(_ stderr: String) -> Bool {
