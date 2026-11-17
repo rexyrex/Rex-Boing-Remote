@@ -43,10 +43,12 @@ The agent is one executable with these commands:
 | `uninstall` | Removes the background service (if any), the keys it installed and its own files, prints a JSON result. |
 | `serve [--interval S]` | Optional background mode: samples on its own and keeps history for `stream` to send (see "Background history"). Runs until stopped. |
 | `install-service` | Registers `serve` with the user's own service manager, starts it, prints a JSON result. |
-| `uninstall-service` | Stops and removes that service and deletes the history it kept, prints a JSON result. |
-| `ssh` | Entry point used by the restricted key. Runs the command named in `SSH_ORIGINAL_COMMAND` if it is exactly one of `stream`, `version`, `doctor`, `doctor --json`, `upgrade --sha256 HEX --size N`, `uninstall`, `pair-code`, `install-service` or `uninstall-service`, and refuses anything else, `serve` included. |
+| `uninstall-service` | Stops and removes that service and deletes the history it kept (and the retention setting), prints a JSON result. |
+| `retention [--days N]` | Shows, or with `--days` sets, how many days of history the background agent keeps: 2 (the default: 48 hours of vitals, 24 hours of process records) to 30. Saved in the install directory and applied at once to a running `serve`; prints a JSON result whose details give `keepDays` and whether `serve` is `running`. |
+| `history [--from T] [--to T] [--at T] [--json] [--utc]` | Prints what the background agent kept between two moments (see "Reading history on the server"). Run on the server, not over the restricted key. |
+| `ssh` | Entry point used by the restricted key. Runs the command named in `SSH_ORIGINAL_COMMAND` if it is exactly one of `stream`, `version`, `doctor`, `doctor --json`, `upgrade --sha256 HEX --size N`, `uninstall`, `pair-code`, `install-service`, `uninstall-service`, `retention` or `retention --days N` (N in decimal digits), and refuses anything else, `serve` and `history` included. |
 
-JSON results of `install`, `upgrade`, `uninstall`, `install-service` and `uninstall-service` have the shape
+JSON results of `install`, `upgrade`, `uninstall`, `install-service`, `uninstall-service` and `retention` have the shape
 `{"ok":true,"message":"…", …}` or `{"ok":false,"error":"code","message":"…"}`.
 
 ## The restricted key
@@ -321,7 +323,39 @@ from the first sample that there is none. Every key is optional.
   table measured.
 
 The message fits in one line of at most 1 MiB: an agent leaves out the
-process tables, then the finest tier, before it would exceed that.
+process tables, then the finest tier, before it would exceed that. Whatever
+the retention, the app is sent the last 48 hours of five-minute points and 24
+hours of process tables, and no usage.
+
+An export (what `serve` saves, and answers `{"want":"export"}` with) is the
+same message with everything kept, and two more keys:
+
+* `keepDays`: the retention in days (2 is the default).
+* `usage`: for every quarter hour kept, oldest first, what processes used
+  over the whole of it, from every process table read in it (where a process
+  table is the one busiest moment). The last entry may be the quarter hour
+  still open, so far.
+
+  ```json
+  {"end":1792206900000,"seconds":900,"scans":60,"count":412,
+   "rows":[{"pid":7,"name":"rsync","user":"alex","start":1792000000000000,"cmd":"rsync -a /srv /backup",
+            "cpu":46.8,"cpuPeak":80.5,"memory":6000000,"diskRead":2000000,"diskWrite":333333,"seen":60}],
+   "rank":{"cpu":[7],"memory":[7],"disk":[7]}}
+  ```
+
+  `end` closes the window, as a process table's quarter hour; `seconds` is
+  how much of it the scans covered, `scans` how many there were and `count`
+  how many processes they saw. `rank` lists the five leaders by `cpu`,
+  `memory`, `disk` (read plus written) and `gpu`, busiest first, and `rows`
+  holds each of them once, busiest by CPU first. `cpu` (percent of one core),
+  `diskRead` and `diskWrite` (bytes per second) and `gpu` (percent) are means
+  over `seconds`, counting a process as idle in scans that did not list it,
+  so `cpu × seconds / 100` is the CPU time it used in core-seconds. `cpuPeak`
+  is the highest one scan measured, `memory` the most resident bytes one
+  scan saw, `seen` how many scans listed it. `cmd` is cut as in the process
+  tables; `diskRead`, `diskWrite` and `gpu` are left out when 0. A process is
+  its `pid` and `start`; the Go agent and the macOS agent rank ties the same
+  way (`agent/internal/history/testdata/usage.json` pins it).
 
 ## Background history
 
@@ -334,11 +368,18 @@ everything else works without it.
 agent, 0 or less means the default), and the process table every 15 seconds,
 into the rings the history message describes. It:
 
+* keeps 48 hours of five-minute points and 24 hours of process tables and
+  usage, or, after `retention --days N` (N from 3 to 30), N days of all
+  three. The setting is `history-settings.json` (`{"keepDays":N}`, mode 0600)
+  in the install directory; there is no file for the default. A shorter
+  retention drops what is older at once. Kept on disk, history takes about
+  0.7 MB a day (5 MB for 7 days, 22 MB for 30), and as much again in memory;
 * saves them to `history.json` in the install directory, through a temporary
-  file and a rename, every 10 minutes and when it stops (SIGTERM, Ctrl-C, or
-  a `stop` request; the Go agent also on SIGHUP, unless started under nohup),
-  and loads them when it starts, so history survives restarts and reboots.
-  The file is the history message itself, mode 0600;
+  file and a rename, every 10 minutes (every 30 minutes when it keeps more
+  than 7 days, since the whole file is rewritten) and when it stops (SIGTERM,
+  Ctrl-C, or a `stop` request; the Go agent also on SIGHUP, unless started
+  under nohup), and loads them when it starts, so history survives restarts
+  and reboots. The file is the export, mode 0600;
 * answers on a local endpoint only, never a TCP port:
   * Linux and macOS: the Unix socket `<install dir>/run/serve.sock`, mode
     0600, in a directory of mode 0700 owned by the user. Connections from
@@ -355,10 +396,13 @@ into the rings the history message describes. It:
   finish (a restart), then exits cleanly.
 
 The endpoint speaks one request line and one answer line per connection:
-`{"want":"history"}` (the history message), `{"want":"status"}`
-(`{"type":"status","pid":…,"version":…,"started":…,"interval":…,"oldest":…,"endpoint":…}`)
-and `{"want":"stop"}` (`{"type":"stopping"}`, then save and exit). Anything
-else gets `{"type":"error","message":"unknown request"}`.
+`{"want":"history"}` (the history message), `{"want":"export"}` (the export:
+not a protocol line, and as long as it needs to be), `{"want":"status"}`
+(`{"type":"status","pid":…,"version":…,"started":…,"interval":…,"keepDays":…,"oldest":…,"endpoint":…}`),
+`{"want":"retention","days":N}` (applies a retention now and saves, then
+answers with the status; `retention` writes the setting itself) and
+`{"want":"stop"}` (`{"type":"stopping"}`, then save and exit). Anything else
+gets `{"type":"error","message":"unknown request"}`.
 
 `stream` asks the endpoint for the history (giving up after 2 seconds) and
 sends it after its hello.
@@ -378,6 +422,37 @@ new `serve` answers (or after 8 seconds), so the next session's history fetch
 finds it. On Linux the unit only starts while the agent's file is there
 (`ConditionPathIsExecutable`).
 `uninstall-service` and `uninstall` remove the service and the history.
+
+## Reading history on the server
+
+`history` prints what the background agent kept, for people and for the
+agents they ask ("what was using the CPU at 3 a.m.?"). It reads the running
+`serve`'s export, or, when none runs, the `history.json` it last saved (and
+says so on stderr). It needs no SSH key of its own: run it on the server, or
+over your own SSH login:
+
+```
+~/.local/share/rex-boing-remote/rex-boing-agent history --at 03:00
+~/.local/share/rex-boing-remote/rex-boing-agent history --from "2026-11-16 22:00" --to "2026-11-17 06:00"
+~/.local/share/rex-boing-remote/rex-boing-agent history --from 3d --json
+```
+
+* `--from` and `--to` take a moment: `now`; how long ago (`90m`, `6h`, `3d`,
+  `2w`, `1h30m`); ms or seconds since the epoch; RFC 3339; a date and time in
+  the server's time zone (`2026-11-17 03:00`, `2026-11-17T03:00:05`); a date
+  (its midnight); or a time of day (today's, or yesterday's if today's is
+  still to come). The defaults are the last 24 hours.
+* `--at T` is the quarter hour holding T, instead of `--from` and `--to`.
+* `--utc` prints times in UTC rather than the server's time zone.
+
+Without `--json` it prints the vitals over the range (means and peaks, from
+the finest tier that reaches back far enough), the processes that used the
+most CPU time, memory, disk and GPU time over it (summed from each quarter
+hour's usage, by process name and user), and the quarter hours with their
+leaders: every one of them for up to 12, otherwise the 12 busiest by CPU.
+With `--json` it prints the export cut to the range, with `"from"` and
+`"to"` (ms): every point, process table and usage entry whose window reaches
+into it.
 
 ## Versioning
 

@@ -49,7 +49,9 @@ Scheduled Task at sign-in), as the user, without root. While it runs:
 - It reads the same vitals the stream does, and the process table every 15
   seconds, with command lines redacted as in the stream.
 - It keeps them in memory and in `history.json` in the agent's directory
-  (mode 0600), at most 48 hours of vitals and 24 hours of process tables.
+  (mode 0600): 48 hours of vitals and 24 hours of process tables and
+  per-process usage, or up to 30 days of each if the user chooses
+  (`retention --days N`, saved in `history-settings.json`, also 0600).
 - It answers only on a Unix socket in a directory only the user can enter
   (mode 0700, socket 0600, peer user checked), or on Windows a named pipe
   whose ACL admits only the user and no remote clients. Never on a network

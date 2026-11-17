@@ -28,7 +28,8 @@ a reboot or has failed services.
 - **History while you're away, if you want it.** Turn on *Keep history while
   this Mac is away* for a server, and the agent keeps sampling there as a
   service of your user (still no port, no root), so the dashboard shows what
-  happened overnight: 48 hours of vitals and the busiest processes.
+  happened overnight: 48 hours of vitals and the busiest processes, or up to
+  30 days kept on the server for you (or an AI agent) to ask about.
 - **No root.** The agent runs as the user you log in as. It can only read.
 - **Reconnects by itself.** After your Mac sleeps, after either side reboots,
   after Wi-Fi or a VPN changes.
@@ -134,6 +135,23 @@ It samples every 2 seconds, keeps 48 hours (in its own folder, so it survives
 restarts), opens no port, and talks only to a socket only your user can reach.
 On reconnect, the agent sends what it kept and the graphs fill in. Turning the
 setting off removes the service and the history it kept.
+
+**Keep on the server** (below the switch) keeps 7, 14 or 30 days instead:
+the vitals, and for every quarter hour what each process used, CPU, memory,
+disk and GPU. That takes about 0.7 MB a day on the server. The History card
+still shows the last 48 hours; for the rest, ask the server, or have an AI
+agent with SSH access ask it:
+
+```
+~/.local/share/rex-boing-remote/rex-boing-agent history --at 03:00
+~/.local/share/rex-boing-remote/rex-boing-agent history --from 3d --json
+```
+
+The first prints a summary of that quarter hour: the vitals, and which
+processes used the most CPU time, memory, disk and GPU. The second prints
+everything kept over the last three days as JSON. `history --help` lists
+every way to name a moment, and PROTOCOL.md ("Reading history on the server")
+says what each value means.
 
 ## What each kind of server reports
 
