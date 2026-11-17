@@ -598,7 +598,7 @@ func CleanupOld() {
 	// patterns cover those names too.
 	removeStale(installDir(), func(n string) bool {
 		return (strings.HasPrefix(n, "rex-boing-agent.") && (strings.HasSuffix(n, ".new.exe") || strings.HasSuffix(n, ".install.tmp"))) ||
-			strings.HasPrefix(n, ".history.json.")
+			strings.HasPrefix(n, ".history.json.") || strings.HasPrefix(n, ".history-settings.json.")
 	})
 }
 

@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/history"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/serve"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
 )
@@ -89,8 +90,9 @@ func Install(agentPath, dir string) wire.Result {
 	if st, ok := serve.WaitRunning(dir, 8*time.Second); ok {
 		details["running"] = "yes"
 		return wire.Result{OK: true, Details: details, Message: fmt.Sprintf(
-			"Keeping history: the agent samples every %g s in the background and keeps 48 hours, as the scheduled task %q. "+
-				"Windows runs it while %s is signed in, and starts it again at every sign-in.", st.Interval, strings.TrimPrefix(TaskName, `\`), userID)}
+			"Keeping history: the agent samples every %g s in the background and keeps %s, as the scheduled task %q. "+
+				"Windows runs it while %s is signed in, and starts it again at every sign-in.", st.Interval,
+			history.KeepDays(st.KeepDays).Text(), strings.TrimPrefix(TaskName, `\`), userID)}
 	}
 	details["running"] = "no"
 	return wire.Result{OK: true, Details: details, Message: fmt.Sprintf(
@@ -114,6 +116,7 @@ func Uninstall(dir string) wire.Result {
 		removed = true
 	}
 	os.Remove(filepath.Join(dir, serve.HistoryFile))
+	os.Remove(filepath.Join(dir, serve.SettingsFile))
 	switch {
 	case removed:
 		return wire.Result{OK: true, Message: "History is off: the scheduled task and the history it kept were removed."}

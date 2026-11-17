@@ -1,7 +1,8 @@
 // Package history is what the background agent (serve) remembers about a
-// machine: three rings of vitals at falling resolution, and the busiest
-// process table of every quarter hour. PROTOCOL.md's "history" message is
-// its wire form, and the same JSON is what serve saves to disk.
+// machine: three rings of vitals at falling resolution, the busiest process
+// table of every quarter hour, and what each process used over every quarter
+// hour. PROTOCOL.md's "history" message is its wire form; serve saves the
+// whole of it to disk, and sends the app the part the app shows.
 //
 // Missing is not zero here either: a series a machine cannot report is left
 // out of the message, and a point where one reading was unavailable carries
@@ -11,6 +12,7 @@ package history
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -134,9 +136,48 @@ const (
 	ProcessSpan = 24 * time.Hour
 	// processRows is how many processes each ranking keeps.
 	processRows = 5
+	// maxUsageProcesses bounds the processes one quarter hour's usage
+	// tracks, on a machine that starts many short-lived ones.
+	maxUsageProcesses = 20000
 	// maxCmd caps a kept command line, in bytes.
 	maxCmd = 200
 )
+
+// Retention is how far back the coarsest tier and the quarter-hour process
+// records go. The finer tiers keep their fixed spans.
+type Retention struct {
+	Days      int
+	Vitals    time.Duration
+	Processes time.Duration
+}
+
+const (
+	// DefaultKeepDays is the retention without a setting: 48 hours of
+	// vitals and 24 hours of process records, as much as the app shows.
+	DefaultKeepDays = 2
+	// MaxKeepDays bounds a setting (PROTOCOL.md, "Background history"):
+	// a month is about 22 MB on disk, rewritten whole on every save.
+	MaxKeepDays = 30
+)
+
+// KeepDays is the retention for a setting of days: the default for
+// DefaultKeepDays or less, otherwise that many days of both.
+func KeepDays(days int) Retention {
+	if days <= DefaultKeepDays {
+		return Retention{Days: DefaultKeepDays, Vitals: CoarseSpan, Processes: ProcessSpan}
+	}
+	days = min(days, MaxKeepDays)
+	d := time.Duration(days) * 24 * time.Hour
+	return Retention{Days: days, Vitals: d, Processes: d}
+}
+
+// Text says what the retention keeps, for messages.
+func (rt Retention) Text() string {
+	if rt.Days <= DefaultKeepDays {
+		return "48 hours of vitals and 24 hours of process records"
+	}
+	return fmt.Sprintf("%d days of vitals and process records", rt.Days)
+}
 
 // tier is one ring: points in time order, none older than span.
 type tier struct {
@@ -228,16 +269,48 @@ type Recorder struct {
 	procBest  *wire.Processes  // the busiest table of the open window
 	procScore float64
 	procEnd   int64
+
+	usage []Usage     // one per ProcessStep window, oldest first
+	open  usageWindow // the window still open
+
+	keep Retention
 }
 
-// NewRecorder returns empty rings for samples interval seconds apart.
+// NewRecorder returns empty rings for samples interval seconds apart, with
+// the default retention.
 func NewRecorder(interval float64, now time.Time) *Recorder {
+	keep := KeepDays(DefaultKeepDays)
 	return &Recorder{
 		Interval: interval,
 		Started:  now.UnixMilli(),
 		fine:     tier{span: FineSpan},
 		medium:   tier{step: MediumStep, span: MediumSpan},
-		coarse:   tier{step: CoarseStep, span: CoarseSpan},
+		coarse:   tier{step: CoarseStep, span: keep.Vitals},
+		keep:     keep,
+	}
+}
+
+// Retention is how far back this recorder keeps history.
+func (r *Recorder) Retention() Retention { return r.keep }
+
+// SetKeepDays changes the retention, dropping at once whatever a shorter
+// one no longer keeps. now is ms since the epoch.
+func (r *Recorder) SetKeepDays(days int, now int64) {
+	r.keep = KeepDays(days)
+	r.coarse.span = r.keep.Vitals
+	r.coarse.prune(now)
+	r.pruneProcesses(now)
+}
+
+// pruneProcesses drops the process tables and usage older than the
+// retention before now (ms).
+func (r *Recorder) pruneProcesses(now int64) {
+	cut := now - r.keep.Processes.Milliseconds()
+	if i := sort.Search(len(r.procs), func(i int) bool { return r.procs[i].SampledAt > cut }); i > 0 {
+		r.procs = append(r.procs[:0], r.procs[i:]...)
+	}
+	if i := sort.Search(len(r.usage), func(i int) bool { return r.usage[i].End > cut }); i > 0 {
+		r.usage = append(r.usage[:0], r.usage[i:]...)
 	}
 }
 
@@ -285,6 +358,7 @@ func (r *Recorder) AddProcesses(p *wire.Processes) {
 	if p == nil || p.SampledAt <= 0 || !(finite(p.Interval) > 0) || len(p.Rows) == 0 {
 		return
 	}
+	r.addUsage(p)
 	if p.SampledAt < r.procEnd-ProcessStep.Milliseconds() {
 		// The clock went back: drop the tables from the old timeline.
 		i := sort.Search(len(r.procs), func(i int) bool { return r.procs[i].SampledAt >= p.SampledAt })
@@ -302,11 +376,7 @@ func (r *Recorder) AddProcesses(p *wire.Processes) {
 		trimmed := trimProcesses(p)
 		r.procBest, r.procScore = &trimmed, score
 	}
-	cut := p.SampledAt - ProcessSpan.Milliseconds()
-	i := sort.Search(len(r.procs), func(i int) bool { return r.procs[i].SampledAt > cut })
-	if i > 0 {
-		r.procs = append(r.procs[:0], r.procs[i:]...)
-	}
+	r.pruneProcesses(p.SampledAt)
 }
 
 // finite returns v, or 0 for NaN and the infinities.
@@ -398,34 +468,74 @@ func (r *Recorder) Oldest() int64 {
 // Empty reports whether nothing has been recorded.
 func (r *Recorder) Empty() bool {
 	return len(r.fine.points) == 0 && len(r.medium.points) == 0 && len(r.coarse.points) == 0 &&
-		len(r.procs) == 0 && r.procBest == nil
+		len(r.procs) == 0 && r.procBest == nil && len(r.usage) == 0 && r.open.scans == 0
 }
 
-// Message is the history message, one JSON object without the newline. It
-// stays under maxLen bytes by leaving out the process tables, then the
-// finest tier, if it must. Windows still open are not included, except the
-// busiest process table so far, which is a real table already.
+// latest is the time of the newest thing recorded, ms since the epoch, or 0.
+func (r *Recorder) latest() int64 {
+	var t int64
+	for _, tr := range []*tier{&r.fine, &r.medium, &r.coarse} {
+		if n := len(tr.points); n > 0 {
+			t = max(t, tr.points[n-1].T)
+		}
+	}
+	if r.procBest != nil {
+		t = max(t, r.procBest.SampledAt)
+	}
+	if n := len(r.procs); n > 0 {
+		t = max(t, r.procs[n-1].SampledAt)
+	}
+	return t
+}
+
+// Message is the history message the app is sent: the last CoarseSpan of
+// vitals and ProcessSpan of process tables, however long the retention,
+// and no usage. It stays under maxLen bytes by leaving out the process
+// tables, then the finest tier, if it must. Windows still open are not
+// included, except the busiest process table so far, which is a real table
+// already.
 func (r *Recorder) Message(maxLen int) []byte {
-	b := r.encode(true, true)
+	b := r.encode(encoding{processes: true, fine: true})
 	if maxLen > 0 && len(b) > maxLen {
-		b = r.encode(false, true)
+		b = r.encode(encoding{fine: true})
 	}
 	if maxLen > 0 && len(b) > maxLen {
-		b = r.encode(false, false)
+		b = r.encode(encoding{})
 	}
 	return b
 }
 
-func (r *Recorder) encode(withProcesses, withFine bool) []byte {
+// Export is everything kept, with the retention and the usage: what serve
+// saves to disk, and what the history command reads. The open window's
+// usage so far is the last entry of usage.
+func (r *Recorder) Export() []byte {
+	return r.encode(encoding{processes: true, fine: true, all: true})
+}
+
+// encoding chooses what encode writes: the process tables, the finest
+// tier, and everything kept (all) or only what the app shows.
+type encoding struct{ processes, fine, all bool }
+
+func (r *Recorder) encode(e encoding) []byte {
+	vitalsCut, procCut := int64(math.MinInt64), int64(math.MinInt64)
+	if !e.all {
+		latest := r.latest()
+		vitalsCut = latest - CoarseSpan.Milliseconds()
+		procCut = latest - ProcessSpan.Milliseconds()
+	}
 	b := make([]byte, 0, 64<<10)
 	b = append(b, `{"type":"history","started":`...)
 	b = strconv.AppendInt(b, r.Started, 10)
 	b = append(b, `,"interval":`...)
 	b = appendNumber(b, r.Interval, 3)
+	if e.all {
+		b = append(b, `,"keepDays":`...)
+		b = strconv.AppendInt(b, int64(r.keep.Days), 10)
+	}
 	b = append(b, `,"tiers":[`...)
 	first := true
 	for _, t := range []*tier{&r.fine, &r.medium, &r.coarse} {
-		if t == &r.fine && !withFine {
+		if t == &r.fine && !e.fine {
 			continue
 		}
 		if !first {
@@ -436,17 +546,36 @@ func (r *Recorder) encode(withProcesses, withFine bool) []byte {
 		if t.step == 0 {
 			step = r.Interval
 		}
-		b = appendTier(b, step, t.points)
+		points := t.points
+		if i := sort.Search(len(points), func(i int) bool { return points[i].T > vitalsCut }); i > 0 {
+			points = points[i:]
+		}
+		b = appendTier(b, step, points)
 	}
 	b = append(b, ']')
-	if withProcesses {
+	if e.processes {
 		tables := r.procs
 		if r.procBest != nil {
 			tables = append(tables[:len(tables):len(tables)], *r.procBest)
 		}
+		if i := sort.Search(len(tables), func(i int) bool { return tables[i].SampledAt > procCut }); i > 0 {
+			tables = tables[i:]
+		}
 		if len(tables) > 0 {
 			if data, err := json.Marshal(tables); err == nil {
 				b = append(b, `,"processes":`...)
+				b = append(b, data...)
+			}
+		}
+	}
+	if e.all {
+		usage := r.usage
+		if r.open.scans > 0 {
+			usage = append(usage[:len(usage):len(usage)], r.open.summary())
+		}
+		if len(usage) > 0 {
+			if data, err := json.Marshal(usage); err == nil {
+				b = append(b, `,"usage":`...)
 				b = append(b, data...)
 			}
 		}
@@ -510,13 +639,16 @@ type wireMessage struct {
 	Type      string                       `json:"type"`
 	Started   int64                        `json:"started"`
 	Interval  float64                      `json:"interval"`
+	KeepDays  int                          `json:"keepDays"`
 	Tiers     []map[string]json.RawMessage `json:"tiers"`
 	Processes []wire.Processes             `json:"processes"`
+	Usage     []Usage                      `json:"usage"`
 }
 
-// Load restores rings saved by Message, dropping whatever has aged out
-// since (or lies in the future: a clock that was wrong when they were
-// saved). Started keeps its own value: it is when this recorder began.
+// Load restores rings saved by Export (or Message), dropping whatever has
+// aged out since under this recorder's retention (or lies in the future: a
+// clock that was wrong when they were saved). Started and the retention
+// keep their own values.
 func (r *Recorder) Load(data []byte, now time.Time) error {
 	var m wireMessage
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -580,7 +712,7 @@ func (r *Recorder) Load(data []byte, now time.Time) error {
 	r.coarse.prune(nowMS)
 
 	r.procs = r.procs[:0]
-	cut := nowMS - ProcessSpan.Milliseconds()
+	cut := nowMS - r.keep.Processes.Milliseconds()
 	for _, p := range m.Processes {
 		if p.SampledAt > cut && p.SampledAt <= nowMS &&
 			(len(r.procs) == 0 || p.SampledAt > r.procs[len(r.procs)-1].SampledAt) {
@@ -595,6 +727,7 @@ func (r *Recorder) Load(data []byte, now time.Time) error {
 		r.procs = r.procs[:n-1]
 		r.procBest, r.procScore, r.procEnd = &last, processScore(last.Rows), bucketEnd(last.SampledAt, ProcessStep)
 	}
+	r.loadUsage(m.Usage, nowMS)
 	return nil
 }
 

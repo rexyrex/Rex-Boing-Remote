@@ -13,9 +13,9 @@ func CleanupOld() {
 	if dir := installDir(); dir != "" {
 		removeStale(dir, func(n string) bool {
 			// upgrade's, unixWriteAtomic's for the agent, and serve's for
-			// history.json.
+			// history.json and history-settings.json.
 			return strings.HasPrefix(n, ".rex-boing-agent-upgrade-") || strings.HasPrefix(n, ".rex-boing-agent.rbr-") ||
-				strings.HasPrefix(n, ".history.json.")
+				strings.HasPrefix(n, ".history.json.") || strings.HasPrefix(n, ".history-settings.json.")
 		})
 	}
 }

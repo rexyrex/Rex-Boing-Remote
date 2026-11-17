@@ -13,12 +13,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/collect"
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/history"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/manage"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/serve"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/service"
@@ -44,6 +47,9 @@ Usage:
   rex-boing-agent serve [--interval S]          keep history in the background (optional)
   rex-boing-agent install-service               run serve as this user's service, now and after reboots
   rex-boing-agent uninstall-service             stop it and delete the history it kept
+  rex-boing-agent retention [--days N]          show or set how many days of history to keep (2–30)
+  rex-boing-agent history [--from T] [--to T] [--at T] [--json] [--utc]
+                                                what the machine and its processes did then
   rex-boing-agent ssh                                                 (used by the installed key)
 `
 
@@ -87,6 +93,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdInstallService(rest, stdout, stderr)
 	case "uninstall-service":
 		return printResult(stdout, service.Uninstall(manage.InstallDir()))
+	case "retention":
+		return cmdRetention(rest, stdout, stderr)
+	case "history":
+		return cmdHistory(rest, time.Now(), stdout, stderr)
 	case "ssh":
 		return cmdSSH(os.Getenv("SSH_ORIGINAL_COMMAND"), stdin, stdout, stderr)
 	case "help", "-h", "--help":
@@ -364,13 +374,195 @@ func cmdInstallService(args []string, stdout, stderr io.Writer) int {
 	return printResult(stdout, service.Install(path, dir))
 }
 
+// cmdRetention shows or sets how much history the background agent keeps.
+// The setting is a file in the install directory, so it holds across
+// restarts; a running serve applies it at once.
+func cmdRetention(args []string, stdout, stderr io.Writer) int {
+	fs := newFlags("retention", stderr)
+	days := fs.Int("days", 0, fmt.Sprintf("keep `N` days of history, %d–%d (%d, the default, keeps 48 hours of vitals and 24 hours of process records)",
+		history.DefaultKeepDays, history.MaxKeepDays, history.DefaultKeepDays))
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	dir := manage.InstallDir()
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == "days" })
+	if !set {
+		keep := history.KeepDays(serve.LoadSettings(dir).KeepDays)
+		details := map[string]string{"keepDays": strconv.Itoa(keep.Days)}
+		if _, err := serve.Query(dir, 2*time.Second); err == nil {
+			details["running"] = "yes"
+		} else {
+			details["running"] = "no"
+		}
+		return printResult(stdout, wire.Result{OK: true, Message: "The background agent keeps " + keep.Text() + ".", Details: details})
+	}
+	if *days < history.DefaultKeepDays || *days > history.MaxKeepDays {
+		return printResult(stdout, wire.Result{OK: false, Error: "usage",
+			Message: fmt.Sprintf("--days must be between %d and %d.", history.DefaultKeepDays, history.MaxKeepDays)})
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return printResult(stdout, wire.Result{OK: false, Error: "not-installed",
+			Message: "The agent is not installed in " + dir + " yet. Add this server in Rex Boing Remote first."})
+	}
+	if err := serve.SaveSettings(dir, serve.Settings{KeepDays: *days}); err != nil {
+		return printResult(stdout, wire.Result{OK: false, Error: "save-failed", Message: "Cannot save the setting: " + err.Error()})
+	}
+	keep := history.KeepDays(*days)
+	details := map[string]string{"keepDays": strconv.Itoa(keep.Days)}
+	if _, err := serve.Retain(dir, keep.Days, 10*time.Second); err == nil {
+		details["running"] = "yes"
+		return printResult(stdout, wire.Result{OK: true, Message: "Keeping " + keep.Text() + " from now on.", Details: details})
+	}
+	details["running"] = "no"
+	return printResult(stdout, wire.Result{OK: true, Details: details,
+		Message: "The background agent will keep " + keep.Text() + " when it runs (it is not running now)."})
+}
+
+// cmdHistory prints what the background agent kept between two moments:
+// from the running serve, which has everything up to now, or else from the
+// file it last saved.
+func cmdHistory(args []string, now time.Time, stdout, stderr io.Writer) int {
+	fs := newFlags("history", stderr)
+	fromFlag := fs.String("from", "", "the start: a time (2026-11-17 03:00, 03:00, RFC 3339, ms since the epoch) or how long ago (90m, 6h, 3d, 2w); default 24h ago")
+	toFlag := fs.String("to", "", "the end, the same way; default now")
+	atFlag := fs.String("at", "", "the quarter hour holding this moment, instead of --from and --to")
+	asJSON := fs.Bool("json", false, "print the range as a history message (PROTOCOL.md)")
+	utc := fs.Bool("utc", false, "show times in UTC rather than this machine's time zone")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
+		return 2
+	}
+	loc := time.Local
+	if *utc {
+		loc = time.UTC
+	}
+	var from, to time.Time
+	var err error
+	switch {
+	case *atFlag != "":
+		if *fromFlag != "" || *toFlag != "" {
+			fmt.Fprintln(stderr, "rex-boing-agent: use --at, or --from and --to, not both")
+			return 2
+		}
+		var at time.Time
+		if at, err = parseMoment(*atFlag, now, loc); err != nil {
+			fmt.Fprintf(stderr, "rex-boing-agent: --at: %v\n", err)
+			return 2
+		}
+		to = at.Truncate(history.ProcessStep)
+		if !to.Equal(at) {
+			to = to.Add(history.ProcessStep)
+		}
+		from = to.Add(-history.ProcessStep)
+	default:
+		to = now
+		if *toFlag != "" {
+			if to, err = parseMoment(*toFlag, now, loc); err != nil {
+				fmt.Fprintf(stderr, "rex-boing-agent: --to: %v\n", err)
+				return 2
+			}
+		}
+		from = to.Add(-24 * time.Hour)
+		if *fromFlag != "" {
+			if from, err = parseMoment(*fromFlag, now, loc); err != nil {
+				fmt.Fprintf(stderr, "rex-boing-agent: --from: %v\n", err)
+				return 2
+			}
+		}
+	}
+	if !from.Before(to) {
+		fmt.Fprintln(stderr, "rex-boing-agent: the start must come before the end")
+		return 2
+	}
+	dir := manage.InstallDir()
+	data, err := serve.Export(dir, 10*time.Second)
+	if err != nil {
+		file := filepath.Join(dir, serve.HistoryFile)
+		saved, ferr := os.ReadFile(file)
+		if ferr != nil {
+			fmt.Fprintln(stderr, "rex-boing-agent: no history is kept on this machine. Turn on Keep history in "+
+				"Rex Boing Remote › Settings › Servers, and the background agent records from then on.")
+			return 1
+		}
+		when := ""
+		if fi, err := os.Stat(file); err == nil {
+			when = " at " + fi.ModTime().In(loc).Format("Mon Jan 2 15:04")
+		}
+		fmt.Fprintf(stderr, "rex-boing-agent: the background agent is not running; this is what it last saved%s.\n", when)
+		data = saved
+	}
+	r, err := history.Select(data, from.UnixMilli(), to.UnixMilli())
+	if err != nil {
+		fmt.Fprintf(stderr, "rex-boing-agent: the history cannot be read: %v\n", err)
+		return 1
+	}
+	if *asJSON {
+		if _, err := stdout.Write(append(r.JSON(), '\n')); err != nil {
+			return 1
+		}
+		return 0
+	}
+	if _, err := io.WriteString(stdout, r.Text(loc)); err != nil {
+		return 1
+	}
+	return 0
+}
+
+var agoPattern = regexp.MustCompile(`^(\d+(?:\.\d+)?)\s*(s|m|min|h|d|w)$`)
+
+// parseMoment reads a moment as the history command takes it: "now", how
+// long ago ("90m", "6h", "3d", "2w", "1h30m"), ms or seconds since the
+// epoch, RFC 3339, a date and time in loc ("2026-11-17 03:00"), a date
+// (its midnight), or a time of day: today's, or yesterday's if today's is
+// still to come.
+func parseMoment(s string, now time.Time, loc *time.Location) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "now" {
+		return now, nil
+	}
+	if m := agoPattern.FindStringSubmatch(s); m != nil {
+		n, _ := strconv.ParseFloat(m[1], 64)
+		unit := map[string]time.Duration{"s": time.Second, "m": time.Minute, "min": time.Minute,
+			"h": time.Hour, "d": 24 * time.Hour, "w": 7 * 24 * time.Hour}[m[2]]
+		return now.Add(-time.Duration(n * float64(unit))), nil
+	}
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return now.Add(-d), nil
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
+		if n >= 1e11 {
+			return time.UnixMilli(n), nil
+		}
+		return time.Unix(n, 0), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02T15:04", "2006-01-02 15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
+			return t, nil
+		}
+	}
+	for _, layout := range []string{"15:04", "15:04:05"} {
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
+			today := now.In(loc)
+			t = time.Date(today.Year(), today.Month(), today.Day(), t.Hour(), t.Minute(), t.Second(), 0, loc)
+			if t.After(now) {
+				t = t.AddDate(0, 0, -1)
+			}
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("%q is not a moment: try 2026-11-17 03:00, 03:00, 6h or 3d", s)
+}
+
 // backgroundCheck is doctor's line about background history.
 func backgroundCheck(dir string) collect.Check {
 	c := collect.Check{Name: "Background history"}
 	if st, err := serve.Query(dir, 2*time.Second); err == nil {
 		c.OK = true
-		c.Detail = fmt.Sprintf("running (pid %d, since %s, sampling every %g s)", st.PID,
-			time.UnixMilli(st.Started).Format("Jan 2 15:04"), st.Interval)
+		c.Detail = fmt.Sprintf("running (pid %d, since %s, sampling every %g s, keeping %s)", st.PID,
+			time.UnixMilli(st.Started).Format("Jan 2 15:04"), st.Interval, history.KeepDays(st.KeepDays).Text())
 		if st.Oldest > 0 {
 			c.Detail += fmt.Sprintf("; history back to %s", time.UnixMilli(st.Oldest).Format("Jan 2 15:04"))
 		}
@@ -389,7 +581,8 @@ func backgroundCheck(dir string) collect.Check {
 // sshCommand checks the command a restricted key's client asked for
 // (SSH_ORIGINAL_COMMAND) against the commands that key may run.
 func sshCommand(original string) ([]string, error) {
-	const allowed = "stream, version, doctor, doctor --json, upgrade, uninstall, pair-code, install-service, uninstall-service"
+	const allowed = "stream, version, doctor, doctor --json, upgrade, uninstall, pair-code, install-service, uninstall-service, " +
+		"retention, retention --days N"
 	f := strings.Fields(original)
 	if len(f) == 0 {
 		return nil, fmt.Errorf("this key only runs the Rex Boing Remote agent and no command was given (allowed: %s)", allowed)
@@ -403,6 +596,14 @@ func sshCommand(original string) ([]string, error) {
 	case "upgrade":
 		_, _, err := upgradeFlags(f[1:], io.Discard)
 		ok = err == nil
+	case "retention":
+		// Only these two forms; the command checks the range itself.
+		if len(f) == 1 {
+			ok = true
+		} else if len(f) == 3 && f[1] == "--days" {
+			n, err := strconv.Atoi(f[2])
+			ok = err == nil && n > 0 && n < 1000 && strconv.Itoa(n) == f[2]
+		}
 	}
 	if !ok {
 		shown := original

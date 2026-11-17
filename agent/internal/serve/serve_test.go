@@ -214,3 +214,41 @@ func TestNoServe(t *testing.T) {
 		t.Errorf("WaitRunning without a serve: %v after %v", ok, time.Since(began))
 	}
 }
+
+// The retention is read at start, changed live, and kept apart from what
+// the app is sent; an export has everything, usage included.
+func TestRetentionAndExport(t *testing.T) {
+	dir := shortDir(t)
+	if err := SaveSettings(dir, Settings{KeepDays: 7}); err != nil {
+		t.Fatal(err)
+	}
+	stop := start(t, dir)
+	defer stop()
+	st, err := Query(dir, time.Second)
+	if err != nil || st.KeepDays != 7 {
+		t.Fatalf("status %+v %v, want 7 days kept", st, err)
+	}
+	time.Sleep(1500 * time.Millisecond) // a sample or two, and a process scan
+	export, err := Export(dir, 2*time.Second)
+	if err != nil || !strings.Contains(string(export), `"keepDays":7`) || !strings.Contains(string(export), `"usage":[`) {
+		t.Fatalf("export %v: %.200s", err, export)
+	}
+	if h := History(dir, time.Second); h == nil || strings.Contains(string(h), `"usage"`) || strings.Contains(string(h), `"keepDays"`) {
+		t.Errorf("the app's history carries usage or the retention: %.200s", h)
+	}
+	if st, err := Retain(dir, 30, time.Second); err != nil || st.KeepDays != 30 {
+		t.Errorf("retain 30: %+v %v", st, err)
+	}
+	if st, err := Retain(dir, 500, time.Second); err != nil || st.KeepDays != 30 {
+		t.Errorf("retain 500: %+v %v, want the most, 30", st, err)
+	}
+	if err := SaveSettings(dir, Settings{KeepDays: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, SettingsFile)); !os.IsNotExist(err) {
+		t.Errorf("the default keeps a settings file: %v", err)
+	}
+	if LoadSettings(dir).KeepDays != 2 {
+		t.Errorf("no settings file is not the default")
+	}
+}

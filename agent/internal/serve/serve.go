@@ -31,12 +31,21 @@ const (
 	// collect.MaxGap, so every scan's rates are valid.
 	ProcessEvery = 15 * time.Second
 	// SaveEvery is how often the rings are written to disk while running;
-	// they are also written when serve stops.
-	SaveEvery = 10 * time.Minute
+	// they are also written when serve stops. A retention longer than
+	// longSaveAfter days makes a file of several megabytes, written
+	// SaveLongEvery instead.
+	SaveEvery     = 10 * time.Minute
+	SaveLongEvery = 30 * time.Minute
+	longSaveAfter = 7
 	// HistoryFile is the rings' file in the install directory.
 	HistoryFile = "history.json"
+	// SettingsFile holds the retention in the install directory.
+	SettingsFile = "history-settings.json"
 	// MaxLine is the protocol's longest line (PROTOCOL.md, "Transport").
 	MaxLine = 1 << 20
+	// maxExport bounds the answer to an export request, which is local
+	// only and not a protocol line: everything kept.
+	maxExport = 512 << 20
 	// maxRequest bounds a request line on the endpoint.
 	maxRequest = 4 << 10
 	// maxClients bounds connections handled at once.
@@ -59,6 +68,8 @@ type Status struct {
 	Version  string  `json:"version"`
 	Started  int64   `json:"started"` // ms since the epoch
 	Interval float64 `json:"interval"`
+	// KeepDays is the retention (history.KeepDays).
+	KeepDays int `json:"keepDays"`
 	// Oldest is the time of the oldest point kept, ms since the epoch.
 	Oldest   int64  `json:"oldest,omitempty"`
 	Endpoint string `json:"endpoint"`
@@ -66,6 +77,37 @@ type Status struct {
 
 type request struct {
 	Want string `json:"want"`
+	Days int    `json:"days,omitempty"`
+}
+
+// Settings is what SettingsFile holds.
+type Settings struct {
+	KeepDays int `json:"keepDays"`
+}
+
+// LoadSettings reads dir's settings; a missing or unreadable file is the
+// default.
+func LoadSettings(dir string) Settings {
+	st := Settings{KeepDays: history.DefaultKeepDays}
+	if data, err := os.ReadFile(filepath.Join(dir, SettingsFile)); err == nil {
+		_ = json.Unmarshal(data, &st)
+	}
+	st.KeepDays = history.KeepDays(st.KeepDays).Days
+	return st
+}
+
+// SaveSettings writes dir's settings, through a temporary file and a
+// rename. The default is no file at all.
+func SaveSettings(dir string, st Settings) error {
+	path := filepath.Join(dir, SettingsFile)
+	if history.KeepDays(st.KeepDays).Days == history.DefaultKeepDays {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	data, _ := json.Marshal(st)
+	return writeFile(path, append(data, '\n'))
 }
 
 // Run samples c until ctx ends or a client asks it to stop. It returns
@@ -102,6 +144,7 @@ func Run(ctx context.Context, c collect.Collector, opts Options) error {
 
 	s := &server{
 		rec:  history.NewRecorder(interval, time.Now()),
+		dir:  opts.Dir,
 		file: filepath.Join(opts.Dir, HistoryFile),
 		log:  log,
 		stop: stop,
@@ -109,12 +152,14 @@ func Run(ctx context.Context, c collect.Collector, opts Options) error {
 			Interval: interval, Endpoint: l.Address()},
 	}
 	s.status.Started = s.rec.Started
+	s.rec.SetKeepDays(LoadSettings(opts.Dir).KeepDays, time.Now().UnixMilli())
 	if data, err := os.ReadFile(s.file); err == nil {
 		if err := s.rec.Load(data, time.Now()); err != nil {
 			fmt.Fprintf(log, "rex-boing-agent: ignoring %s: %v\n", s.file, err)
 		}
 	}
-	fmt.Fprintf(log, "rex-boing-agent: keeping history every %gs, on %s\n", interval, l.Address())
+	fmt.Fprintf(log, "rex-boing-agent: keeping %d days of history, sampling every %gs, on %s\n",
+		s.rec.Retention().Days, interval, l.Address())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -138,6 +183,7 @@ type server struct {
 	mu     sync.Mutex
 	rec    *history.Recorder
 	status Status
+	dir    string
 	file   string
 	log    io.Writer
 	stop   context.CancelFunc
@@ -161,8 +207,12 @@ func (s *server) sample(ctx context.Context, c collect.Collector, interval float
 		s.mu.Lock()
 		s.rec.Add(sample)
 		s.rec.AddProcesses(procs)
+		every := SaveEvery
+		if s.rec.Retention().Days > longSaveAfter {
+			every = SaveLongEvery
+		}
 		s.mu.Unlock()
-		if now.Sub(lastSave) >= SaveEvery {
+		if now.Sub(lastSave) >= every {
 			lastSave = now
 			if err := s.save(); err != nil {
 				fmt.Fprintf(s.log, "rex-boing-agent: could not save history: %v\n", err)
@@ -176,14 +226,20 @@ func (s *server) sample(ctx context.Context, c collect.Collector, interval float
 	}
 }
 
-// save writes the rings through a temporary file, so a crash or a power
-// cut leaves the previous file or the new one, never half of one.
+// save writes everything kept, through a temporary file.
 func (s *server) save() error {
 	s.mu.Lock()
-	data := s.rec.Message(0)
+	data := s.rec.Export()
 	s.mu.Unlock()
-	dir := filepath.Dir(s.file)
-	f, err := os.CreateTemp(dir, "."+HistoryFile+".*")
+	return writeFile(s.file, data)
+}
+
+// writeFile writes data through a temporary file and a rename, so a crash
+// or a power cut leaves the previous file or the new one, never half of
+// one. The file is mode 0600.
+func writeFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
@@ -204,7 +260,7 @@ func (s *server) save() error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.file)
+	return os.Rename(tmp, path)
 }
 
 func (s *server) accept(l listener) {
@@ -244,13 +300,21 @@ func (s *server) handle(c conn) {
 	var req request
 	_ = json.Unmarshal(line, &req)
 	var answer []byte
-	stopping := false
+	stopping, changed := false, false
 	s.mu.Lock()
 	switch req.Want {
 	case "history":
 		answer = s.rec.Message(MaxLine - 1)
+	case "export":
+		answer = s.rec.Export()
+	case "retention":
+		// The settings file is the caller's to write; this applies it now.
+		s.rec.SetKeepDays(req.Days, time.Now().UnixMilli())
+		changed = true
+		fallthrough
 	case "status":
 		st := s.status
+		st.KeepDays = s.rec.Retention().Days
 		st.Oldest = s.rec.Oldest()
 		answer, _ = json.Marshal(st)
 	case "stop":
@@ -260,7 +324,14 @@ func (s *server) handle(c conn) {
 		answer = []byte(`{"type":"error","message":"unknown request"}`)
 	}
 	s.mu.Unlock()
-	c.SetDeadline(time.Now().Add(10 * time.Second))
+	if changed {
+		// A shorter retention dropped history: the file should not
+		// bring it back after a crash.
+		if err := s.save(); err != nil {
+			fmt.Fprintf(s.log, "rex-boing-agent: could not save history: %v\n", err)
+		}
+	}
+	c.SetDeadline(time.Now().Add(30 * time.Second))
 	if _, err := c.Write(append(answer, '\n')); err != nil {
 		return
 	}
@@ -272,6 +343,11 @@ func (s *server) handle(c conn) {
 
 // ask sends one request to the serve for dir and returns its one-line answer.
 func ask(dir, want string, timeout time.Duration) ([]byte, error) {
+	return askLimit(dir, request{Want: want}, MaxLine, timeout)
+}
+
+// askLimit sends req and returns an answer of at most limit bytes.
+func askLimit(dir string, req request, limit int, timeout time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
 	c, err := dial(dir, timeout)
 	if err != nil {
@@ -279,16 +355,17 @@ func ask(dir, want string, timeout time.Duration) ([]byte, error) {
 	}
 	defer c.Close()
 	c.SetDeadline(deadline)
-	if _, err := c.Write([]byte(`{"want":"` + want + `"}` + "\n")); err != nil {
+	line, _ := json.Marshal(req)
+	if _, err := c.Write(append(line, '\n')); err != nil {
 		return nil, err
 	}
 	r := bufio.NewReaderSize(c, 64<<10)
-	var line []byte
+	var answer []byte
 	for {
 		chunk, err := r.ReadSlice('\n')
-		line = append(line, chunk...)
-		if len(line) > MaxLine {
-			return nil, errors.New("the answer is longer than a protocol line")
+		answer = append(answer, chunk...)
+		if len(answer) > limit {
+			return nil, errors.New("the answer is longer than it may be")
 		}
 		if err == nil {
 			break
@@ -297,7 +374,7 @@ func ask(dir, want string, timeout time.Duration) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return line[:len(line)-1], nil
+	return answer[:len(answer)-1], nil
 }
 
 // History returns the history message of this user's running serve, or nil
@@ -318,12 +395,42 @@ func History(dir string, timeout time.Duration) []byte {
 	return b
 }
 
+// Export returns everything this user's running serve keeps (Export), or
+// an error when none answers within timeout.
+func Export(dir string, timeout time.Duration) ([]byte, error) {
+	b, err := askLimit(dir, request{Want: "export"}, maxExport, timeout)
+	if err != nil {
+		return nil, err
+	}
+	var head struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(b, &head) != nil || head.Type != "history" {
+		return nil, errors.New("the background agent gave an answer that is not its history")
+	}
+	return b, nil
+}
+
+// Retain tells the running serve to keep days of history from now on, and
+// returns its status. The caller saves the setting (SaveSettings).
+func Retain(dir string, days int, timeout time.Duration) (Status, error) {
+	b, err := askLimit(dir, request{Want: "retention", Days: days}, MaxLine, timeout)
+	if err != nil {
+		return Status{}, err
+	}
+	return parseStatus(b)
+}
+
 // Query returns the running serve's status.
 func Query(dir string, timeout time.Duration) (Status, error) {
 	b, err := ask(dir, "status", timeout)
 	if err != nil {
 		return Status{}, err
 	}
+	return parseStatus(b)
+}
+
+func parseStatus(b []byte) (Status, error) {
 	var st Status
 	if err := json.Unmarshal(b, &st); err != nil || st.Type != "status" {
 		return Status{}, errors.New("the background agent gave an answer that is not a status")

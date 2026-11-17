@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/history"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/serve"
 	"github.com/rexyrex/Rex-Boing-Remote/agent/internal/wire"
 )
@@ -146,8 +147,8 @@ func Install(agentPath, dir string) wire.Result {
 		}
 	}
 	details["linger"] = state
-	msg := fmt.Sprintf("Keeping history: the agent samples every %g s in the background and keeps 48 hours, "+
-		"as the systemd user service %s.", st.Interval, Name)
+	msg := fmt.Sprintf("Keeping history: the agent samples every %g s in the background and keeps %s, "+
+		"as the systemd user service %s.", st.Interval, history.KeepDays(st.KeepDays).Text(), Name)
 	if state == "no" {
 		fix := lingerFix(name)
 		details["fix"] = fix
@@ -172,6 +173,7 @@ func Uninstall(dir string) wire.Result {
 	}
 	stopped := stopRunning(dir)
 	os.Remove(filepath.Join(dir, serve.HistoryFile))
+	os.Remove(filepath.Join(dir, serve.SettingsFile))
 	serve.RemoveEndpoint(dir)
 	switch {
 	case removed:
