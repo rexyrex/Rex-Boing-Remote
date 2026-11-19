@@ -376,6 +376,11 @@ private struct GeneralSettings: View {
                 ForEach(Visualizer.allCases) { visual in Text(visual.name).tag(visual) }
             }
             Toggle("Show the busiest server's CPU beside the fleet rex", isOn: $settings.showFleetReadout)
+            Picker("Character colour", selection: $settings.rexColor) {
+                ForEach(RexColor.allCases) { color in Text(color.label).tag(color) }
+            }
+            Text("Where a live server's rex starts while it has room. Either way it turns orange past 70% CPU and red at 100%. White follows the menu bar: black on a light one.")
+                .font(.caption).foregroundStyle(.secondary)
             Toggle("Animate characters", isOn: $settings.animate)
             Toggle("Open the window when Rex Boing Remote starts", isOn: $settings.openWindowAtLaunch)
             Toggle("Open at login", isOn: Binding(

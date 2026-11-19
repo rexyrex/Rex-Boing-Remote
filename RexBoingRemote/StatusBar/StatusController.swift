@@ -123,6 +123,7 @@ final class StatusController: NSObject, NSPopoverDelegate {
         // live — no servers yet, or all of them down — it rests.
         fleetItem.character = settings.fleetCharacter
         fleetItem.animate = settings.animate
+        fleetItem.color = settings.rexColor
         fleetItem.load = fleet.busiestLoad
         fleetItem.isAsleep = total > 0 && live == 0
         fleetItem.readout = settings.showFleetReadout && total > 0
@@ -153,6 +154,7 @@ final class StatusController: NSObject, NSPopoverDelegate {
             let isLive = connection?.state == .live
             item.character = server.character
             item.animate = settings.animate
+            item.color = settings.rexColor
             item.load = isLive ? snapshot?.cpu.total ?? 0 : 0
             item.isAsleep = !isLive
             item.readout = Self.readout(for: server, snapshot: isLive ? snapshot : nil, unit: settings.temperatureUnit)

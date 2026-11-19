@@ -3,6 +3,25 @@ import Combine
 import RexBoingKit
 import ServiceManagement
 
+/// The colour a live server's rex starts from, before load carries it to
+/// orange past 70% and red at 100%. The same choice as Rex Boing's.
+enum RexColor: String, CaseIterable, Identifiable {
+    /// Green while the server has room.
+    case green
+    /// The menu bar's own label colour, as the rex was drawn before it turned
+    /// green: white on a dark bar, black on a light one.
+    case white
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .green: return "Green → Red"
+        case .white: return "White → Red"
+        }
+    }
+}
+
 /// App-wide preferences, in `UserDefaults`. Per-server choices (pinning, the
 /// character, the readout) live with the server in `ServerStore`.
 @MainActor
@@ -31,6 +50,11 @@ final class AppSettings: ObservableObject {
 
     @Published var animate: Bool {
         didSet { defaults.set(animate, forKey: Keys.animate) }
+    }
+
+    /// Where every rex's colour ramp starts, the fleet's and each server's.
+    @Published var rexColor: RexColor {
+        didSet { defaults.set(rexColor.rawValue, forKey: Keys.rexColor) }
     }
 
     /// Whether the fleet item shows the busiest server's CPU beside its rex.
@@ -64,6 +88,7 @@ final class AppSettings: ObservableObject {
         static let temperatureUnit = "temperatureUnit"
         static let fleetCharacter = "fleetCharacter"
         static let animate = "animate"
+        static let rexColor = "rexColor"
         static let showFleetReadout = "showFleetReadout"
         static let askedAboutLogin = "askedAboutLogin"
         static let openWindowAtLaunch = "openWindowAtLaunch"
@@ -78,6 +103,7 @@ final class AppSettings: ObservableObject {
         temperatureUnit = TemperatureUnit(rawValue: defaults.string(forKey: Keys.temperatureUnit) ?? "") ?? .celsius
         fleetCharacter = Visualizer(rawValue: defaults.string(forKey: Keys.fleetCharacter) ?? "") ?? .rex
         animate = defaults.object(forKey: Keys.animate) as? Bool ?? true
+        rexColor = RexColor(rawValue: defaults.string(forKey: Keys.rexColor) ?? "") ?? .green
         showFleetReadout = defaults.object(forKey: Keys.showFleetReadout) as? Bool ?? true
         openWindowAtLaunch = defaults.bool(forKey: Keys.openWindowAtLaunch)
         mcpEnabled = defaults.object(forKey: MCPBridge.enabledKey) as? Bool ?? true

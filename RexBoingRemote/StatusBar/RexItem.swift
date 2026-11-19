@@ -48,6 +48,9 @@ final class RexItem: NSObject {
     var load: Double = 0
     var isAsleep = false { didSet { if oldValue != isAsleep { refreshReadout(); retune() } } }
     var animate = true { didSet { retune() } }
+    /// Where a live rex's colour starts: green, or the menu bar's own colour
+    /// as it was before the rex turned green.
+    var color: RexColor = .green { didSet { if oldValue != color { refreshReadout() } } }
     var readout: ReadoutCell? { didSet { if oldValue != readout { refreshReadout() } } }
     /// Also what VoiceOver reads for the item, which has no text of its
     /// own: the server's name and how it is.
@@ -69,8 +72,8 @@ final class RexItem: NSObject {
     private var scheduledRate: Double = 0
     private var inkAlpha: Float = 1
     private var neutralInk = NSColor.labelColor
-    /// `RestInk`, resolved opaque under the button's appearance, where the
-    /// live rex's colour starts.
+    /// Where the live rex's colour starts: `RestInk`, or the label colour for
+    /// White → Red, resolved opaque under the button's appearance.
     private var restInk = NSColor.labelColor
 
     // The Smooth setting of Rex Boing: up to 30 fps, 18 frames a cycle.
@@ -129,7 +132,9 @@ final class RexItem: NSObject {
         button.effectiveAppearance.performAsCurrentDrawingAppearance {
             let label = NSColor.labelColor.usingColorSpace(.deviceRGB) ?? .labelColor
             neutralInk = label.withAlphaComponent(1)
-            restInk = (RestInk.color.usingColorSpace(.deviceRGB) ?? neutralInk).withAlphaComponent(1)
+            restInk = color == .white
+                ? neutralInk
+                : (RestInk.color.usingColorSpace(.deviceRGB) ?? neutralInk).withAlphaComponent(1)
             inkAlpha = Float(label.alphaComponent) * (isAsleep ? 0.45 : 1)
             image = SignalBadge.compose(
                 readouts: StatusBarRenderer.renderReadouts(
