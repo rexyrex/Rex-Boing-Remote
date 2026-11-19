@@ -36,6 +36,9 @@ a reboot or has failed services.
 - **Works with your SSH setup.** Aliases, jump hosts, `ProxyCommand`,
   1Password and Secretive agents, hardware keys: if `ssh myserver` works in
   Terminal, it works here.
+- **Ask an AI agent.** Claude Code, Codex and other MCP clients can read what
+  the app holds: which servers are up, their readings, top processes and
+  history. Read-only, over a port local to your Mac's login session.
 
 macOS 14 or later on the Mac. Servers: Linux (x86-64, ARM64, ARMv6/7 —
 Raspberry Pi included), macOS 14+, Windows 10/11 and Server 2019+.
@@ -153,6 +156,62 @@ everything kept over the last three days as JSON. `history --help` lists
 every way to name a moment, and PROTOCOL.md ("Reading history on the server")
 says what each value means.
 
+## Ask an AI agent
+
+Rex Boing Remote is also an MCP server, so an AI agent can answer questions
+about your servers from what the app holds: "is anything down?", "what's
+using the home server's CPU?", "what was busy at 3 a.m.?". Add it to Claude
+Code or Codex with the command in Settings › General › AI agents, which
+carries this copy's own path:
+
+```bash
+claude mcp add --scope user rex-boing-remote -- "/Applications/Rex Boing Remote.app/Contents/MacOS/Rex Boing Remote" mcp
+codex mcp add rex-boing-remote -- "/Applications/Rex Boing Remote.app/Contents/MacOS/Rex Boing Remote" mcp
+```
+
+Any other MCP client (Claude Desktop, an IDE) takes the same executable with
+the argument `mcp`. The tools:
+
+| Tool | What it answers |
+|---|---|
+| `list_servers` | Every server: how it is reached, its OS and model, whether it is live or down (why, since when, the next try), its CPU, memory, GPU, temperature and power, what needs you (a reboot, failed services, updates, the agent's notices), and whether it keeps history in the background. |
+| `get_server_snapshot` | Everything one server's dashboard shows now: CPU per core, GPUs, memory and swap, sensors and fans, power, pressure stall, network, disks and filesystems, battery and system, part by part if you like. |
+| `get_server_processes` | Its top processes by CPU, memory, GPU or disk, with their command lines. |
+| `get_server_history` | Its vitals over a window of up to the last 48 hours, evened out to a few dozen points with the mean, low and high of each. |
+| `get_server_process_history` | The busiest processes of each quarter hour: what was running at a moment, or the busiest quarter hours of a window. |
+
+Units are in the key names (`cpuPercent`, `memoryUsedBytes`, `cpuCelsius`),
+times carry your Mac's UTC offset, and a reading a server can't report is
+left out rather than sent as 0. A server that is down still answers with its
+last readings and history, and says why it is down.
+
+The app holds 48 hours. What a server keeps beyond that (*Keep on the
+server*, up to 30 days) stays on the server: an agent with SSH access of its
+own reads it there with `rex-boing-agent history`, as above. The MCP server
+can't reach it, by design: the app's key is not allowed to run `history`.
+
+How it works: the agent starts the app's executable with `mcp`, a small relay
+on stdin and stdout that shows nothing. It answers the handshake and the
+tool list itself, and passes each question to the running app over a local
+Mach message port, starting the app in the background if it isn't running
+(`mcp --no-launch` turns that off). There is no network listener, no socket
+file and no TCP port: only programs running as you in your login session can
+reach the port. Every tool only reads; none adds, removes or changes a
+server or a setting. While an agent asks for a server's snapshot or
+processes, the app asks that server for full detail, as an open dashboard
+does, and goes back to the usual vitals some seconds after the last
+question; nothing else is asked of a server, and the restricted key is
+unchanged. Answers carry what the dashboards show and no more: never the
+app's SSH key, key paths or pairing codes, and command lines arrive with
+passwords and tokens already removed by the agent. What an agent reads goes
+where that agent sends it, usually its model's provider. To stop it, turn off
+*Let AI agents read your servers' readings*: the port goes away and agents
+are told it is off.
+
+From a shell, `"…/Rex Boing Remote" tools` lists the tools,
+`"…/Rex Boing Remote" call list_servers` runs one, and `mcp --help` prints
+the options and registration commands.
+
 ## What each kind of server reports
 
 <p align="center"><img src="docs/dashboard-lower.png" width="440" alt="Further down a dashboard: the top processes, power, network with the server's address, storage, and every filesystem with its free space."></p>
@@ -192,6 +251,9 @@ same as Rex Boing's: they are the same code, shared through the
 
 - The app talks only to the servers you add. No telemetry, no analytics, no
   update checks.
+- AI agents you add it to read what the dashboards show, through a port
+  local to your login session, never the network; they can't change
+  anything (see [Ask an AI agent](#ask-an-ai-agent)).
 - The key the app installs is restricted on the server with `restrict` and a
   forced command: it cannot open a shell, forward ports or run anything but the
   agent.
@@ -228,7 +290,8 @@ cd agent && go test ./...   # the Go agent's tests
 To work on Rex Boing's shared code at the same time, point the build at your
 checkout: `REX_BOING_PATH=../Rex-Boing Scripts/build.sh`. No servers to try it
 on? `open "dist/Rex Boing Remote.app" --args --demo` starts it with made-up
-ones. See [CONTRIBUTING.md](CONTRIBUTING.md).
+ones, and `mcp --demo` lets an agent ask that copy only. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

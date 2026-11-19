@@ -11,6 +11,7 @@ read.
 |---|---|
 | `RexBoingRemote/` | The Mac app (Swift, SwiftUI and AppKit) |
 | `RexBoingRemote/Demo/` | Demo mode: made-up servers whose agents are recordings |
+| `RexBoingRemote/MCP/` | The MCP server: the `mcp` stdio bridge, the app's message port, the tools and their payloads |
 | `MacAgent/` | The macOS agent: Rex Boing's samplers, headless |
 | `Shared/` | Swift shared by the app and the macOS agent: background history's rings and message |
 | `agent/` | The Linux and Windows agent (Go) |
@@ -30,9 +31,35 @@ Needs Xcode 26 or later, XcodeGen and Go 1.24 or later.
 ```bash
 Scripts/build.sh                         # agents, app → dist/
 REX_BOING_PATH=../Rex-Boing Scripts/build.sh   # against a local Rex Boing checkout
-Tools/check.sh                           # the app's reconnection and demo checks
+Tools/check.sh                           # the app's reconnection, demo and MCP checks
 cd agent && go vet ./... && go test ./...
 ```
+
+`Tools/check.sh` runs two headless checks: `connection-check` (the
+reconnection logic against a fake ssh, and demo mode) and `mcp-check` (the
+MCP protocol against scripted lines, every tool's schema, payloads built from
+the recordings and from synthetic samples, naming a server, and a bridge
+reaching demo connections through the app's message port).
+
+## The MCP server
+
+`"Rex Boing Remote.app/Contents/MacOS/Rex Boing Remote" mcp` is the stdio MCP
+server agents run; `RemoteApp.swift` hands over to `MCPBridge` before AppKit
+starts. The bridge answers `initialize`, `server/discover`, `ping` and
+`tools/list` itself and relays tool calls to the running app's
+`MCPAppServer` over a `CFMessagePort`. The app answers on its main run loop
+at once, so a call that needs a fresh full sample is answered "retry", and
+the bridge asks again until it is ready. To try it without servers:
+
+```bash
+open "dist/Rex Boing Remote.app" --args --demo
+"dist/Rex Boing Remote.app/Contents/MacOS/Rex Boing Remote" call list_servers --demo
+```
+
+A tool reads what the connections already hold and never asks a server for
+anything a dashboard wouldn't. Payloads are built from the samples as the
+agents sent them (`ServerConnection.lastSample`), not from `Snapshot`, so a
+missing reading stays missing; key names carry their units.
 
 ## Demo mode: no servers needed
 

@@ -17,6 +17,22 @@ meant to hold up to anyone reading the code.
   setup only, by acting as ssh's askpass helper. Answers go straight to ssh and
   are never stored. Background connections run with `BatchMode=yes` and can
   never prompt.
+- Answers AI agents (MCP) while *Let AI agents read your servers' readings*
+  is on (Settings › General; on by default, since an agent only asks once
+  the user registers the app with it). An agent runs the app's executable
+  with `mcp`: a relay on stdin and stdout that starts no interface, runs no
+  ssh and keeps nothing. It passes each tool call to the running app over a
+  local Mach message port (`com.rexyrex.RexBoingRemote.mcp`; demo mode's copy
+  uses its own name), which is registered in the login session's bootstrap
+  namespace: not a network listener, not a file, out of reach of other
+  users and other machines. Any program running as the user in that session
+  can look it up and read what the dashboards show, as it could read the
+  app's windows; it can change nothing, because every tool only reads.
+  Answers carry no SSH key, key path, askpass material or pairing code, and
+  process command lines are the ones the agents already redacted. A tool
+  that needs a server's full detail asks for it exactly as an open
+  dashboard does, and lets go some seconds after the last call. Turning the
+  setting off removes the port.
 
 ## What it does on a server
 
