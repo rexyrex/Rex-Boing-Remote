@@ -13,13 +13,32 @@ private final class DisplayLinkProxy: NSObject {
     }
 }
 
+/// The green a live rex rests in, which `LoadInk` carries to orange past 70%
+/// load and to red at 100%: green while a server has room, red when it is
+/// flat out. The palette's own green on a dark bar, a darker one on a light
+/// bar, where the palette's falls under 3:1.
+///
+/// The same colours as Rex Boing's `LoadInk.rest`, repeated here because the
+/// RexBoingKit release this builds against predates it. Switch to that once
+/// the package is moved past 1.3.0.
+private enum RestInk {
+    static let color = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? onDark : onLight
+    }
+
+    private static let onDark = NSColor(Palette.calm)
+    private static let onLight = NSColor(srgbRed: 0.11, green: 0.56, blue: 0.28, alpha: 1)
+}
+
 /// One menu bar item: an animated rex, Remote's signal mark and an optional
 /// readout, drawn with Rex Boing's own renderer so the characters move
 /// exactly as they do there.
 ///
-/// The rex's pace follows `load` (0–1). When the server it stands for is
-/// offline, `isAsleep` stills it and dims it, which is the menu bar's way of
-/// saying "not live" without a word of text.
+/// The rex's pace follows `load` (0–1), and so does its colour: green at
+/// rest, orange and then red as the server works harder. When the server it
+/// stands for is offline, `isAsleep` stills it, dims it and drops the colour
+/// for the menu bar's own, which is the menu bar's way of saying "not live"
+/// without a word of text.
 @MainActor
 final class RexItem: NSObject {
     let statusItem: NSStatusItem
@@ -50,6 +69,9 @@ final class RexItem: NSObject {
     private var scheduledRate: Double = 0
     private var inkAlpha: Float = 1
     private var neutralInk = NSColor.labelColor
+    /// `RestInk`, resolved opaque under the button's appearance, where the
+    /// live rex's colour starts.
+    private var restInk = NSColor.labelColor
 
     // The Smooth setting of Rex Boing: up to 30 fps, 18 frames a cycle.
     private let maximumFrameRate: Double = 30
@@ -107,6 +129,7 @@ final class RexItem: NSObject {
         button.effectiveAppearance.performAsCurrentDrawingAppearance {
             let label = NSColor.labelColor.usingColorSpace(.deviceRGB) ?? .labelColor
             neutralInk = label.withAlphaComponent(1)
+            restInk = (RestInk.color.usingColorSpace(.deviceRGB) ?? neutralInk).withAlphaComponent(1)
             inkAlpha = Float(label.alphaComponent) * (isAsleep ? 0.45 : 1)
             image = SignalBadge.compose(
                 readouts: StatusBarRenderer.renderReadouts(
@@ -155,7 +178,7 @@ final class RexItem: NSObject {
         canvas.time = shouldAnimate ? clock : Visualizer.restingTime
         canvas.load = smoothedLoad
         canvas.color = isAsleep ? neutralInk : LoadInk.color(
-            forLoad: (smoothedLoad * 200).rounded() / 200, neutral: neutralInk)
+            forLoad: (smoothedLoad * 200).rounded() / 200, neutral: restInk)
         visualLayer.setNeedsDisplay()
     }
 
