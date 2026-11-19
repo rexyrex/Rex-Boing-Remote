@@ -259,6 +259,18 @@ final class StatusController: NSObject, NSPopoverDelegate {
 
     private func showMenu(for item: RexItem) {
         let menu = NSMenu()
+        // A newer release goes first, where it is seen; there is no item at
+        // all while this copy is the newest.
+        if let release = UpdateCheck.shared.available {
+            let update = NSMenuItem(
+                title: "Rex Boing Remote \(release.version) Is Available…", action: #selector(updateAction),
+                keyEquivalent: "")
+            update.target = self
+            update.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            update.toolTip = "You have \(UpdateCheck.shared.currentVersion). Opens the release page on GitHub."
+            menu.addItem(update)
+            menu.addItem(.separator())
+        }
         menu.addItem(withTitle: "Open Window", action: #selector(windowAction), keyEquivalent: "o").target = self
         menu.addItem(withTitle: "Add Server…", action: #selector(addServerAction), keyEquivalent: "n").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(settingsAction), keyEquivalent: ",").target = self
@@ -276,6 +288,7 @@ final class StatusController: NSObject, NSPopoverDelegate {
     @objc private func settingsAction() { openSettings() }
     @objc private func reconnectAction() { fleet.retryAll() }
     @objc private func quitAction() { NSApp.terminate(nil) }
+    @objc private func updateAction() { UpdateCheck.shared.openReleasePage() }
     @objc private func aboutAction() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: [

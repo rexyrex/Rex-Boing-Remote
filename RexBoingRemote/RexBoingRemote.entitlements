@@ -5,7 +5,9 @@
 	<!--
 	  Not sandboxed: the app runs the system's own /usr/bin/ssh with the
 	  user's ~/.ssh/config, so jump hosts, agents and hardware keys work as
-	  they do in Terminal. It connects only to the servers the user adds.
+	  they do in Terminal. It connects only to the servers the user adds,
+	  and once a day to GitHub to see whether a newer release is out
+	  (App/UpdateCheck.swift; Settings › General turns it off).
 	-->
 	<key>com.apple.security.app-sandbox</key>
 	<false/>

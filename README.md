@@ -53,6 +53,10 @@ Or download `Rex.Boing.Remote.zip` from the
 [latest release](https://github.com/rexyrex/Rex-Boing-Remote/releases/latest),
 unzip it and move it to Applications. It is signed and notarized.
 
+When a new version is out, the menu bar popover, the window, the rexes'
+right-click menu and Settings say so, with a link to the release
+(`brew upgrade --cask rex-boing-remote` if you installed with Homebrew).
+
 ## Add a server
 
 Open the app; the Add Server window comes up on its own the first time.
@@ -249,8 +253,10 @@ same as Rex Boing's: they are the same code, shared through the
 
 ## Security and privacy
 
-- The app talks only to the servers you add. No telemetry, no analytics, no
-  update checks.
+- The app talks only to the servers you add, and to GitHub once a day to see
+  whether a newer release is out (it carries nothing about your Mac or your
+  servers; **Check for new versions** in Settings › General turns it off). No
+  telemetry, no analytics.
 - AI agents you add it to read what the dashboards show, through a port
   local to your login session, never the network; they can't change
   anything (see [Ask an AI agent](#ask-an-ai-agent)).

@@ -4,7 +4,9 @@
 # hangs, refuses and stays down on cue, and against demo mode's recordings;
 # then the MCP layer: the stdio protocol against scripted lines, the tools'
 # schemas, payloads from the recordings and synthetic samples, and a bridge
-# reaching demo connections through the app's message port.
+# reaching demo connections through the app's message port; and the update
+# check's version comparison and reading of GitHub's release JSON, without
+# asking GitHub anything.
 # The agents have their own tests:
 # cd agent && go test ./...
 set -euo pipefail
@@ -34,3 +36,7 @@ FAKE_SSH="$PWD/Tools/fake-ssh.sh" .build/checks/connection-check
 swiftc -swift-version 5 -parse-as-library -I "$P" -o .build/checks/mcp-check \
     Tools/mcp-check.swift RexBoingRemote/MCP/*.swift "${SOURCES[@]}" "${LINK[@]}"
 .build/checks/mcp-check
+
+swiftc -swift-version 5 -parse-as-library -o .build/checks/update-check \
+    Tools/update-check.swift RexBoingRemote/App/UpdateCheck.swift -framework AppKit
+.build/checks/update-check

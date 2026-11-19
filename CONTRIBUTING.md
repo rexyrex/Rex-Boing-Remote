@@ -35,11 +35,13 @@ Tools/check.sh                           # the app's reconnection, demo and MCP 
 cd agent && go vet ./... && go test ./...
 ```
 
-`Tools/check.sh` runs two headless checks: `connection-check` (the
-reconnection logic against a fake ssh, and demo mode) and `mcp-check` (the
+`Tools/check.sh` runs three headless checks: `connection-check` (the
+reconnection logic against a fake ssh, and demo mode), `mcp-check` (the
 MCP protocol against scripted lines, every tool's schema, payloads built from
 the recordings and from synthetic samples, naming a server, and a bridge
-reaching demo connections through the app's message port).
+reaching demo connections through the app's message port) and `update-check`
+(the update check's version comparison and its reading of GitHub's release
+JSON, without asking GitHub anything).
 
 ## The MCP server
 

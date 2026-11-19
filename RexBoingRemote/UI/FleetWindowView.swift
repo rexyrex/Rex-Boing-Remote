@@ -107,8 +107,16 @@ struct FleetWindowView: View {
 
     // MARK: Detail
 
-    @ViewBuilder
     private var detail: some View {
+        VStack(spacing: 0) {
+            // A newer release, when there is one; otherwise nothing.
+            UpdateNotice()
+            detailContent
+        }
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
         if let selected = selectedServer {
             ServerBoard(
                 server: selected.server, connection: selected.connection,

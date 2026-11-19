@@ -11,11 +11,14 @@ struct PopoverView: View {
     /// The tallest the content may be: the dashboard uses all of it, the
     /// fleet list only what its rows need.
     var maxHeight: CGFloat = 760
+    /// Watched for the band a newer release adds under the header.
+    @ObservedObject var updates = UpdateCheck.shared
 
     private var height: CGFloat {
         if navigation.selected != nil { return maxHeight }
-        if store.servers.isEmpty { return min(maxHeight, 380) }
-        return min(maxHeight, 64 + 30 + CGFloat(store.servers.count) * 53 + 16)
+        let notice = updates.available == nil ? 0 : UpdateNotice.height
+        if store.servers.isEmpty { return min(maxHeight, 380 + notice) }
+        return min(maxHeight, 64 + 30 + CGFloat(store.servers.count) * 53 + 16 + notice)
     }
 
     var body: some View {
@@ -36,6 +39,8 @@ struct PopoverView: View {
             } else {
                 header
                 Divider().opacity(0.5)
+                // A newer release, when there is one; otherwise nothing.
+                UpdateNotice()
                 if store.servers.isEmpty {
                     EmptyFleet(addServer: actions.addServer)
                 } else {

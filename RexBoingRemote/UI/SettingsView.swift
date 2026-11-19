@@ -382,12 +382,70 @@ private struct GeneralSettings: View {
                 get: { settings.launchAtLogin },
                 set: { settings.setLaunchAtLogin($0) }))
             AgentAccess(settings: settings)
+            UpdatesSection(settings: settings)
             LabeledContent("Data") {
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([Paths.support]) }
             }
             LabeledContent("Version", value: BundledAgent.version)
         }
         .formStyle(.grouped)
+    }
+}
+
+/// The update check's switch, where it stands, and the one button that fits:
+/// download a newer release, or ask again now.
+private struct UpdatesSection: View {
+    @ObservedObject var settings: AppSettings
+    @ObservedObject private var check = UpdateCheck.shared
+
+    var body: some View {
+        Section("Updates") {
+            Toggle(isOn: $settings.checkForUpdates) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Check for new versions")
+                    Text("Once a day the app asks GitHub for its latest release, carrying nothing about this Mac or "
+                         + "your servers, and says so here, over the servers and in the rex's right-click menu when a newer one is out.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack(alignment: .firstTextBaseline) {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(isAvailable ? .primary : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                if isAvailable {
+                    Button("Download…") { check.openReleasePage() }
+                        .controlSize(.small)
+                } else {
+                    Button("Check Now") { check.checkNow() }
+                        .controlSize(.small)
+                        .disabled(!settings.checkForUpdates || Demo.isActive || check.status == .checking)
+                }
+            }
+        }
+    }
+
+    private var isAvailable: Bool { settings.checkForUpdates && check.available != nil }
+
+    private var message: String {
+        if Demo.isActive { return "Demo mode never checks." }
+        guard settings.checkForUpdates else { return "Off: the app connects only to your servers." }
+        let current = check.currentVersion
+        if let release = check.available {
+            return "Rex Boing Remote \(release.version) is available. You have \(current)."
+        }
+        switch check.status {
+        case .off, .idle: return "Not checked yet."
+        case .checking: return "Checking…"
+        case .failed(let reason): return "Couldn't check: \(reason). It tries again within the hour."
+        case .checked:
+            guard let date = check.lastChecked else { return "\(current) is the newest version." }
+            let when = RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+            return "\(current) is the newest version. Checked \(when)."
+        }
     }
 }
 

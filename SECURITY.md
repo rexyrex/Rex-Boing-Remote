@@ -11,8 +11,12 @@ meant to hold up to anyone reading the code.
 - Keeps its own files in `~/Library/Application Support/Rex Boing Remote/`:
   its SSH key pair (`id_ed25519`, mode 600), host keys pinned from pairing
   codes (`known_hosts`) and the server list.
-- Connects only to the servers you add. There is no telemetry, analytics,
-  crash reporting or update check.
+- Connects only to the servers you add, and, while *Check for new versions*
+  is on (Settings › General; on by default), once a day to GitHub's API for
+  the latest release of Rex Boing Remote. That request carries the app's
+  version and nothing about the Mac or the servers, and the app installs
+  nothing it hears of: the notice links to the release page. There is no
+  telemetry, analytics or crash reporting.
 - Answers ssh's prompts (passwords, codes, host keys) in its own dialogs during
   setup only, by acting as ssh's askpass helper. Answers go straight to ssh and
   are never stored. Background connections run with `BatchMode=yes` and can

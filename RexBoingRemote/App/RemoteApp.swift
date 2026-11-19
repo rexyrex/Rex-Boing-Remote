@@ -71,6 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { enabled in mcp.enabled = enabled }
             .store(in: &cancellables)
 
+        // A new release is news for the real app only: demo mode is for
+        // trying the app and recording it, and asks GitHub nothing.
+        if !Demo.isActive {
+            UpdateCheck.shared.start(enabled: settings.$checkForUpdates)
+        }
+
         // The app's key exists before it is first needed, so the install
         // command can be shown at once.
         _ = try? AppKey.publicKey()

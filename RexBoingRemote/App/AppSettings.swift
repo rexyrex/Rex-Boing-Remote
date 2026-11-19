@@ -51,6 +51,12 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(mcpEnabled, forKey: MCPBridge.enabledKey) }
     }
 
+    /// Whether the app asks GitHub, once a day, if a newer release is out
+    /// (see `UpdateCheck`). On by default, so a new version is announced.
+    @Published var checkForUpdates: Bool {
+        didSet { defaults.set(checkForUpdates, forKey: Keys.checkForUpdates) }
+    }
+
     @Published private(set) var launchAtLogin: Bool
 
     private enum Keys {
@@ -61,6 +67,7 @@ final class AppSettings: ObservableObject {
         static let showFleetReadout = "showFleetReadout"
         static let askedAboutLogin = "askedAboutLogin"
         static let openWindowAtLaunch = "openWindowAtLaunch"
+        static let checkForUpdates = "checkForUpdates"
     }
 
     static let intervals: [Double] = [1, 2, 5, 10]
@@ -74,6 +81,7 @@ final class AppSettings: ObservableObject {
         showFleetReadout = defaults.object(forKey: Keys.showFleetReadout) as? Bool ?? true
         openWindowAtLaunch = defaults.bool(forKey: Keys.openWindowAtLaunch)
         mcpEnabled = defaults.object(forKey: MCPBridge.enabledKey) as? Bool ?? true
+        checkForUpdates = defaults.object(forKey: Keys.checkForUpdates) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
