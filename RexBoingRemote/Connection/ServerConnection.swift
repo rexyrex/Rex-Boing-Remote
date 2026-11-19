@@ -102,6 +102,20 @@ final class ServerConnection: ObservableObject, Identifiable {
     @Published private(set) var background: Background = .unknown
     /// When the last history message arrived.
     private(set) var historyReceivedAt: Date?
+    /// The last sample as the agent sent it, and the last one with full
+    /// detail and when it arrived. `snapshot` fills what a server doesn't
+    /// report with zeros, as the cards want; the AI agents' tools read these
+    /// instead, so a missing reading stays missing.
+    private(set) var lastSample: WireSample?
+    /// The lists only full detail has (sensors, fans, filesystems,
+    /// interfaces, the process table) come with some samples, not every one:
+    /// agents re-read slow sources less often. So each is carried over from
+    /// the full sample before until a newer one comes, as the dashboard
+    /// does, and `detailTimes` says when each came (`t`, milliseconds).
+    private(set) var lastFullSample: WireSample?
+    private(set) var lastFullSampleAt: Date?
+    private(set) var lastProcessTableAt: Date?
+    private(set) var detailTimes: [String: Int64] = [:]
 
     enum Background: Equatable {
         /// No session has got far enough to tell.
@@ -116,6 +130,9 @@ final class ServerConnection: ObservableObject, Identifiable {
     @Published private(set) var lastSampleAt: Date?
     /// When the current problem began, for "offline for 3 minutes".
     @Published private(set) var downSince: Date?
+    /// Why the last attempt failed, until the server is live again: what a
+    /// retry that is connecting right now is retrying.
+    private(set) var lastFailure: String?
 
     /// What the screen needs from this server right now: everything while
     /// any dashboard shows it (the popover's and the window's may both),
@@ -398,11 +415,14 @@ final class ServerConnection: ObservableObject, Identifiable {
                 rings.add(sample)
             }
             if sample.processes != nil { processHistory.record(next) }
+            lastSample = sample
+            if sample.detail == "full" { keepDetail(sample) }
             snapshot = next
             lastSampleAt = Date()
             if state != .live {
                 state = .live
                 downSince = nil
+                lastFailure = nil
                 liveSince = Date()
             }
             // The backoff starts over once a session has stayed up a while,
@@ -414,6 +434,41 @@ final class ServerConnection: ObservableObject, Identifiable {
         case .other:
             break
         }
+    }
+
+    /// Keeps a full sample, with the lists it didn't bring carried over from
+    /// the one before.
+    private func keepDetail(_ sample: WireSample) {
+        var merged = sample
+        let previous = lastFullSample
+        let t = sample.t ?? 0
+        func carry<Value>(_ name: String, _ fresh: Value?, _ older: Value?, _ put: (inout WireSample, Value) -> Void) {
+            if fresh != nil {
+                detailTimes[name] = t
+            } else if let older {
+                put(&merged, older)
+            }
+        }
+        carry("sensors", sample.thermal?.sensors, previous?.thermal?.sensors) { sample, value in
+            if sample.thermal == nil { sample.thermal = WireThermal() }
+            sample.thermal?.sensors = value
+        }
+        carry("fans", sample.thermal?.fans, previous?.thermal?.fans) { sample, value in
+            if sample.thermal == nil { sample.thermal = WireThermal() }
+            sample.thermal?.fans = value
+        }
+        carry("volumes", sample.disk?.volumes, previous?.disk?.volumes) { sample, value in
+            if sample.disk == nil { sample.disk = WireDisk() }
+            sample.disk?.volumes = value
+        }
+        carry("interfaces", sample.network?.interfaces, previous?.network?.interfaces) { sample, value in
+            if sample.network == nil { sample.network = WireNetwork() }
+            sample.network?.interfaces = value
+        }
+        carry("processes", sample.processes, previous?.processes) { sample, value in sample.processes = value }
+        if sample.processes != nil { lastProcessTableAt = Date() }
+        lastFullSample = merged
+        lastFullSampleAt = Date()
     }
 
     // MARK: - History
@@ -539,6 +594,7 @@ final class ServerConnection: ObservableObject, Identifiable {
         let base = steps[min(attempt - 1, steps.count - 1)]
         let delay = base * Double.random(in: 0.8...1.2)
         let until = Date().addingTimeInterval(delay)
+        lastFailure = reason
         connectionLog.info("\(self.server.name, privacy: .public): retrying in \(String(format: "%.1f", delay), privacy: .public) s (\(reason, privacy: .public))")
         state = .waiting(until: until, reason: reason)
         arm(after: delay)
