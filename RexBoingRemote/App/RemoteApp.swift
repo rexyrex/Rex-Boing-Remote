@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @main
@@ -7,6 +8,11 @@ enum RemoteMain {
     static func main() {
         // ssh runs this same executable as its askpass helper during setup.
         if Askpass.isRequested { Askpass.run() }
+
+        // AI agents run it as their MCP server (`… mcp`): a relay on stdio
+        // that never starts NSApplication, so it shows nothing and never
+        // counts as a running copy of the app.
+        if MCPBridge.isRequested { exit(MCPBridge.run(Array(CommandLine.arguments.dropFirst()))) }
 
         // Writing to the stdin of an ssh that has just exited must be an
         // ordinary error, not a signal that ends the app.
@@ -25,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var store: ServerStore?
     private var fleet: Fleet?
     private var status: StatusController?
+    private var mcp: MCPAppServer?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // One copy at a time: a second launch hands over to the first. A demo
@@ -35,9 +43,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
             .filter { Demo.isMarked($0.processIdentifier) == Demo.isActive }
         if let running = others.first {
-            // The running copy shows its window when it is reopened.
-            NSWorkspace.shared.openApplication(at: running.bundleURL ?? Bundle.main.bundleURL,
-                                               configuration: NSWorkspace.OpenConfiguration())
+            // The running copy shows its window when it is reopened. A copy
+            // an AI agent's bridge started leaves the running one as it is:
+            // the bridge only needed it to be there.
+            if !MCPBridge.launchedForAgent {
+                NSWorkspace.shared.openApplication(at: running.bundleURL ?? Bundle.main.bundleURL,
+                                                   configuration: NSWorkspace.OpenConfiguration())
+            }
             NSApp.terminate(nil)
             return
         }
@@ -51,10 +63,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.fleet = fleet
         status = StatusController(fleet: fleet, store: store, settings: settings)
 
+        // AI agents' tool calls, answered over a local message port while
+        // the setting is on; with it off there is no port at all.
+        let mcp = MCPAppServer { [weak fleet] in fleet?.ordered ?? [] }
+        self.mcp = mcp
+        settings.$mcpEnabled
+            .sink { enabled in mcp.enabled = enabled }
+            .store(in: &cancellables)
+
         // The app's key exists before it is first needed, so the install
         // command can be shown at once.
         _ = try? AppKey.publicKey()
 
+        // Started by an agent's bridge, the app comes up quietly in the menu
+        // bar, as at login: no Add Server window, no window at all.
+        guard !MCPBridge.launchedForAgent else { return }
         if store.servers.isEmpty {
             status?.openAddServer()
         }
@@ -73,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        mcp?.enabled = false
         fleet?.connections.values.forEach { $0.stop() }
         if Demo.isActive { Demo.unmark() }
     }

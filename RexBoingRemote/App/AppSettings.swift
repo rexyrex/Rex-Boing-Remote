@@ -44,6 +44,13 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(openWindowAtLaunch, forKey: Keys.openWindowAtLaunch) }
     }
 
+    /// Whether AI agents may read the servers' readings over MCP. On by
+    /// default: registering the server with an agent is the opt-in, and
+    /// turning this off removes the app's message port altogether.
+    @Published var mcpEnabled: Bool {
+        didSet { defaults.set(mcpEnabled, forKey: MCPBridge.enabledKey) }
+    }
+
     @Published private(set) var launchAtLogin: Bool
 
     private enum Keys {
@@ -66,6 +73,7 @@ final class AppSettings: ObservableObject {
         animate = defaults.object(forKey: Keys.animate) as? Bool ?? true
         showFleetReadout = defaults.object(forKey: Keys.showFleetReadout) as? Bool ?? true
         openWindowAtLaunch = defaults.bool(forKey: Keys.openWindowAtLaunch)
+        mcpEnabled = defaults.object(forKey: MCPBridge.enabledKey) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 

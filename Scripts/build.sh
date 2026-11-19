@@ -40,11 +40,23 @@ APP=".build/Build/Products/Release/Rex Boing Remote.app"
 rm -rf dist && mkdir -p dist && cp -R "$APP" dist/
 echo "==> Staged dist/Rex Boing Remote.app"
 
-# The processes running from the installed app, and only those: a copy
-# run from dist/ or anywhere else (a demo beside the real one) is not it.
+# The app running from the installed bundle, and only that: a copy run from
+# dist/ or anywhere else (a demo beside the real one) is not it, and nor are
+# the MCP bridges AI agents run from the same executable (`… mcp`, `… tools`,
+# `… call`). Quitting a bridge would drop an agent's connection; a bridge
+# outlives the app being replaced and finds the new one by itself.
 installed_pids() {
-    ps -axo pid=,comm= | awk -v dir="$TARGET/Contents/MacOS/" '
-        { pid = $1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); if (index($0, dir) == 1) print pid }'
+    local exe="$TARGET/Contents/MacOS/Rex Boing Remote" pid args rest
+    for pid in $(ps -axo pid=,comm= | awk -v dir="$TARGET/Contents/MacOS/" '
+        { pid = $1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); if (index($0, dir) == 1) print pid }'); do
+        args=$(ps -o args= -p "$pid" 2>/dev/null) || continue
+        # The executable's path has spaces, so the command is what follows it.
+        rest=${args#"$exe"}
+        case "$rest" in
+            " mcp" | " mcp "* | " tools" | " tools "* | " call" | " call "*) continue ;;
+        esac
+        echo "$pid"
+    done
 }
 
 if [ "$INSTALL" -eq 1 ]; then

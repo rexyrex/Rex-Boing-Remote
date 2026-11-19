@@ -381,11 +381,53 @@ private struct GeneralSettings: View {
             Toggle("Open at login", isOn: Binding(
                 get: { settings.launchAtLogin },
                 set: { settings.setLaunchAtLogin($0) }))
+            AgentAccess(settings: settings)
             LabeledContent("Data") {
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([Paths.support]) }
             }
             LabeledContent("Version", value: BundledAgent.version)
         }
         .formStyle(.grouped)
+    }
+}
+
+/// The MCP server's switch, and the commands that register it with an agent,
+/// built from this copy's own executable.
+private struct AgentAccess: View {
+    @ObservedObject var settings: AppSettings
+    @State private var copied: String?
+
+    var body: some View {
+        Section("AI agents") {
+            Toggle(isOn: $settings.mcpEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Let AI agents read your servers' readings")
+                    Text("Agents you add Rex Boing Remote to, such as Claude Code or Codex, can ask what your "
+                         + "servers report now and what they did over the last 48 hours; they can read, never change anything.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            ForEach(MCPBridge.registrationCommands(), id: \.client) { entry in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Add to \(entry.client)")
+                        Spacer()
+                        Button(copied == entry.client ? "Copied" : "Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(entry.command, forType: .string)
+                            copied = entry.client
+                        }
+                        .controlSize(.small)
+                    }
+                    Text(entry.command)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 }
